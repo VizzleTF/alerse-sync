@@ -1,0 +1,5 @@
+/arcomium-sync
+/arcomium-sync.exe
+/dist/
+*.test
+*.out

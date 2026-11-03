@@ -1,0 +1,38 @@
+version: "2"
+
+linters:
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - nolintlint
+    - unconvert
+    - unparam
+    - usestdlibvars
+  settings:
+    errcheck:
+      # Closing what was only read, and writes to a client that went away.
+      exclude-functions:
+        - (io.ReadCloser).Close
+        - (*compress/gzip.Reader).Close
+        - (net.Listener).Close
+        - os.RemoveAll
+        - fmt.Fprintln
+    gosec:
+      excludes:
+        - G115 # integer conversions are bounded by protocol limits
+  exclusions:
+    generated: strict
+    rules:
+      - path: _test\.go
+        linters: [gosec]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/VizzleTF/arcomium-sync

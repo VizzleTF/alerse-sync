@@ -1,0 +1,30 @@
+# Release binaries for a tag v*; see .github/workflows/release.yml.
+version: 2
+
+builds:
+  - main: ./cmd/arcomium-sync
+    binary: arcomium-sync
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, windows, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - docker-compose.yml
+
+checksum:
+  name_template: SHA256SUMS
+
+changelog:
+  use: github-native
