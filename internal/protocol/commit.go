@@ -101,6 +101,9 @@ func (s *Service) commitEntry(ctx context.Context, tx store.Tx, cacheGUID string
 		return rejected(pb.CommitResponse_INVALID_MESSAGE, "entity changed its data type"), 0, nil
 	case existing.ServerTag != "" && entry.GetDeleted():
 		return rejected(pb.CommitResponse_INVALID_MESSAGE, "permanent entities cannot be deleted"), 0, nil
+	case existing.Version != entry.GetVersion() && entry.GetVersion() == 0 && overwriteTypes[dataType]:
+		// The client no longer knows the version; its commit replaces the
+		// entity.
 	case existing.Version != entry.GetVersion() && (!existing.Deleted || entry.GetVersion() != 0):
 		// Only a deleted entity may be created again, from version 0, with
 		// its client tag.

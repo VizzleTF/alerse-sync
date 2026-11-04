@@ -16,6 +16,7 @@ import (
 const (
 	bookmarkType = 32904
 	nigoriType   = 47745
+	historyType  = 963985
 )
 
 // commitOnlyTypes are data types clients send and never fetch (Chromium's
@@ -25,6 +26,14 @@ const (
 // it accepts and drops them.
 var commitOnlyTypes = map[int32]bool{
 	455206: true, 556014: true, 600372: true, 728866: true, 1142081: true, 1661069: true,
+}
+
+// overwriteTypes are data types whose clients forget an entity's version once
+// it is committed: Chromium's history bridge stops tracking synced visits, so
+// a later change to a visit comes from version 0. Google's server lets such a
+// commit replace the entity; so does this one.
+var overwriteTypes = map[int32]bool{
+	historyType: true,
 }
 
 // rootParentID is the parent of the top-level permanent entities.

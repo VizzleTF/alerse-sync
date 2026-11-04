@@ -289,6 +289,37 @@ func TestClientTags(t *testing.T) {
 	}
 }
 
+func TestHistoryOverwrite(t *testing.T) {
+	s, _ := newService(t, nil)
+	a, b := newDevice(t, s, "a"), newDevice(t, s, "b")
+	a.updates(historyType)
+	b.updates(historyType)
+
+	visit := func(title string) *pb.SyncEntity {
+		return &pb.SyncEntity{
+			IdString:      proto.String("c-visit"),
+			ClientTagHash: proto.String("visit"),
+			Specifics: &pb.EntitySpecifics{SpecificsVariant: &pb.EntitySpecifics_History{
+				History: &pb.HistorySpecifics{OriginatorCacheGuid: proto.String(title)},
+			}},
+		}
+	}
+	first := a.commitOne(visit("One"))
+	if first.GetResponseType() != pb.CommitResponse_SUCCESS {
+		t.Fatalf("create: %v", first.GetResponseType())
+	}
+	// The history bridge forgot the version: the change comes from version 0.
+	second := a.commitOne(visit("Two"))
+	if second.GetResponseType() != pb.CommitResponse_SUCCESS || second.GetIdString() != first.GetIdString() ||
+		second.GetVersion() <= first.GetVersion() {
+		t.Fatalf("overwrite: %v %s v%d", second.GetResponseType(), second.GetIdString(), second.GetVersion())
+	}
+	got := b.updates(historyType)
+	if len(got) != 1 || got[0].GetSpecifics().GetHistory().GetOriginatorCacheGuid() != "Two" {
+		t.Fatalf("b sees %v", got)
+	}
+}
+
 func TestBirthday(t *testing.T) {
 	s, _ := newService(t, nil)
 	a := newDevice(t, s, "a")
