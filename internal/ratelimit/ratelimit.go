@@ -1,4 +1,5 @@
-// Package ratelimit limits requests per sync chain with token buckets.
+// Package ratelimit limits requests per key, such as a sync chain or an IP
+// address, with token buckets.
 package ratelimit
 
 import (
@@ -9,7 +10,7 @@ import (
 // sweepInterval is how often idle buckets are dropped.
 const sweepInterval = 10 * time.Minute
 
-// Limiter allows each key a number of requests per minute, all of which it
+// Limiter allows each key a number of requests per period, all of which it
 // may spend at once. A nil Limiter allows everything.
 type Limiter struct {
 	perSecond float64
@@ -29,15 +30,31 @@ type bucket struct {
 // New returns a limiter of perMinute requests per key, or nil if perMinute
 // is not positive.
 func New(perMinute int) *Limiter {
-	if perMinute <= 0 {
+	return NewPer(perMinute, time.Minute)
+}
+
+// NewPer returns a limiter of n requests per period per key, or nil if n is
+// not positive.
+func NewPer(n int, period time.Duration) *Limiter {
+	if n <= 0 || period <= 0 {
 		return nil
 	}
 	return &Limiter{
-		perSecond: float64(perMinute) / 60,
-		burst:     float64(perMinute),
+		perSecond: float64(n) / period.Seconds(),
+		burst:     float64(n),
 		now:       time.Now,
 		buckets:   map[string]*bucket{},
 	}
+}
+
+// Keys returns the number of keys the limiter tracks.
+func (l *Limiter) Keys() int {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.buckets)
 }
 
 // Allow takes a request of key. If the key has none left, it returns false

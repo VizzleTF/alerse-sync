@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/VizzleTF/arcomium-sync/internal/auth"
+	"github.com/VizzleTF/arcomium-sync/internal/clientip"
 )
 
 const (
@@ -45,10 +46,16 @@ type Hub struct {
 	log         *slog.Logger
 	maxPerChain int
 	maxTotal    int
+	// MaxPerAddr limits the streams from one client address (see
+	// clientip.Key); 0 for no limit. Set it before serving.
+	MaxPerAddr int
 
 	mu          sync.Mutex
 	subscribers map[string]map[*subscriber]struct{}
+	perAddr     map[string]int
 	total       int
+	closed      chan struct{}
+	closeOnce   sync.Once
 }
 
 // New returns a hub. With pool set, Notify goes through Postgres NOTIFY and
@@ -58,7 +65,23 @@ func New(pool *pgxpool.Pool, log *slog.Logger, maxPerChain, maxTotal int) *Hub {
 	return &Hub{
 		pool: pool, log: log, maxPerChain: maxPerChain, maxTotal: maxTotal,
 		subscribers: map[string]map[*subscriber]struct{}{},
+		perAddr:     map[string]int{},
+		closed:      make(chan struct{}),
 	}
+}
+
+// Close ends every open stream and refuses new ones, so that a server can
+// shut down without waiting for streams that never end on their own.
+// Devices reconnect, to another instance or after the restart.
+func (h *Hub) Close() {
+	h.closeOnce.Do(func() { close(h.closed) })
+}
+
+// Streams returns the number of open streams.
+func (h *Hub) Streams() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.total
 }
 
 // Notify announces changed data types of a chain to its devices other than
@@ -127,6 +150,7 @@ func (h *Hub) listen(ctx context.Context) error {
 // writes them, so a slow device gets them merged instead of losing some.
 type subscriber struct {
 	cacheGUID string
+	addr      string
 	wake      chan struct{}
 
 	mu      sync.Mutex
@@ -177,20 +201,24 @@ func (h *Hub) resyncAll() {
 	}
 }
 
-func (h *Hub) subscribe(chainID, cacheGUID string) (*subscriber, bool) {
+func (h *Hub) subscribe(chainID, cacheGUID, addr string) (*subscriber, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	subs := h.subscribers[chainID]
-	if len(subs) >= h.maxPerChain || h.total >= h.maxTotal {
+	if len(subs) >= h.maxPerChain || h.total >= h.maxTotal ||
+		(h.MaxPerAddr > 0 && addr != "" && h.perAddr[addr] >= h.MaxPerAddr) {
 		return nil, false
 	}
 	if subs == nil {
 		subs = map[*subscriber]struct{}{}
 		h.subscribers[chainID] = subs
 	}
-	sub := &subscriber{cacheGUID: cacheGUID, wake: make(chan struct{}, 1)}
+	sub := &subscriber{cacheGUID: cacheGUID, addr: addr, wake: make(chan struct{}, 1)}
 	subs[sub] = struct{}{}
 	h.total++
+	if addr != "" {
+		h.perAddr[addr]++
+	}
 	return sub, true
 }
 
@@ -201,6 +229,11 @@ func (h *Hub) unsubscribe(chainID string, sub *subscriber) {
 	h.total--
 	if len(h.subscribers[chainID]) == 0 {
 		delete(h.subscribers, chainID)
+	}
+	if sub.addr != "" {
+		if h.perAddr[sub.addr]--; h.perAddr[sub.addr] <= 0 {
+			delete(h.perAddr, sub.addr)
+		}
 	}
 }
 
@@ -215,7 +248,15 @@ func (h *Hub) unsubscribe(chainID string, sub *subscriber) {
 // stream. It needs auth.Middleware in front.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	chainID := auth.ChainFromContext(r.Context())
-	sub, ok := h.subscribe(chainID, r.URL.Query().Get("cache_guid"))
+	select {
+	case <-h.closed:
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "the server is shutting down", http.StatusServiceUnavailable)
+		return
+	default:
+	}
+	addr := clientip.Key(clientip.FromContext(r.Context()))
+	sub, ok := h.subscribe(chainID, r.URL.Query().Get("cache_guid"), addr)
 	if !ok {
 		w.Header().Set("Retry-After", "60")
 		http.Error(w, "too many event streams", http.StatusTooManyRequests)
@@ -244,6 +285,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var sent bool
 		select {
 		case <-r.Context().Done():
+			return
+		case <-h.closed:
 			return
 		case <-heartbeat.C:
 			sent = write(": ping\n\n")
