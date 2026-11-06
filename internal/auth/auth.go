@@ -64,11 +64,13 @@ func Verify(token string, now time.Time) (string, error) {
 	public := ed25519.PublicKey(raw[1 : 1+ed25519.PublicKeySize])
 	issuedAt := time.UnixMilli(int64(binary.BigEndian.Uint64(raw[1+ed25519.PublicKeySize:])))
 	signature := raw[tokenSize-ed25519.SignatureSize:]
-	if !ed25519.Verify(public, signedPart(raw[:tokenSize-ed25519.SignatureSize]), signature) {
-		return "", ErrSignature
-	}
+	// The time first: it is cheap, and a flood of old tokens should not
+	// cost a signature check each.
 	if issuedAt.Before(now.Add(-MaxAge)) || issuedAt.After(now.Add(MaxSkew)) {
 		return "", ErrExpired
+	}
+	if !ed25519.Verify(public, signedPart(raw[:tokenSize-ed25519.SignatureSize]), signature) {
+		return "", ErrSignature
 	}
 	return ChainID(public), nil
 }
