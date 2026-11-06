@@ -33,12 +33,35 @@ gzip-compressed. The server handles three requests:
 | Request | What the server does |
 |---|---|
 | GetUpdates | Returns each requested data type's entities that changed after the client's progress token, oldest first, up to 500 entities or 16 MiB per response. `changes_remaining` tells the client to ask again. With `need_encryption_key` it adds the chain's keystore key |
-| Commit | Stores the entities in one transaction and answers each one: `SUCCESS` with its ID and version, `CONFLICT` if the client's version is out of date, `OVER_QUOTA` or `INVALID_MESSAGE` |
+| Commit | Stores the entities in one transaction and answers each one: `SUCCESS` with its ID and version, `CONFLICT` if the client's version is out of date, `OVER_QUOTA`, `TRANSIENT_ERROR` or `INVALID_MESSAGE` (see Limits) |
 | ClearServerData | Deletes the chain. Its other devices get `NOT_MY_BIRTHDAY`, turn sync off and clear their sync data |
 
 **Versions.** Each chain has a counter. Every committed entity gets the next
 value as its version, under a lock on the chain, so versions only grow. A
-progress token is the highest version a client has of a data type.
+progress token is the highest version a client has of a data type. Tokens are
+opaque to clients:
+
+```text
+incremental = 0x01 | version (8 bytes, big-endian)
+snapshot    = 0x02 | version reached (8) | chain version when the download began (8)
+```
+
+A data type whose version is not past the client's token costs no database
+read, and its new token is the chain's version, so the next request skips it
+as well.
+
+**First sync.** A client without a token gets the live entities of the type,
+without tombstones: it has nothing to delete. While the download pages, the
+client holds a snapshot token; entities that change during the download get
+newer versions and follow in the same sync cycle, deletions included.
+
+**Removed tombstones.** The server removes tombstones after `TOMBSTONE_TTL`
+(see [What the server stores](#what-the-server-stores)). A client whose token is
+older than a removed tombstone may have missed that deletion, so it downloads
+the type's live entities again, like a first sync. The first response of that
+download carries `gc_directive { version_watermark }` in the type's progress
+marker, which makes Chromium drop the entities it does not receive. Devices
+that sync more often than the TTL never see this.
 
 **Birthday.** A chain gets a random birthday when it is created. The first
 GetUpdates of a device learns it; every later request has to send it back. A
@@ -63,9 +86,29 @@ sharing invitations), are accepted and dropped.
 one ID per tag. If two devices create it, the second commit conflicts instead
 of making a duplicate.
 
-**Limits.** A chain that sends requests too fast gets `THROTTLED` with
-`throttle_delay_seconds`. An entity may be 256 KiB. When the server holds
-`MAX_CHAINS` chains, a new chain's first request gets `TRANSIENT_ERROR`.
+**Limits.** Commits are answered per entity:
+
+| Limit | Answer |
+|---|---|
+| An entity over 256 KiB | `INVALID_MESSAGE` |
+| `MAX_BYTES_PER_CHAIN`, counting tombstones | `OVER_QUOTA`, after history made what room it can |
+| `MAX_ENTITIES` live entities of the types not limited below: bookmarks, passwords, settings and so on | `OVER_QUOTA` |
+| `MAX_SESSION_ENTITIES` open tabs and windows | `OVER_QUOTA` |
+| `MAX_HISTORY_ENTITIES` or `MAX_HISTORY_BYTES` of history and history delete directives | `SUCCESS`: the oldest visits are dropped, a hundredth more than needed. Clients expire history on their own, so nothing tells them |
+| `REQUIRE_CUSTOM_PASSPHRASE`, data of a type Chromium can encrypt while the chain's Nigori node is not in `CUSTOM_PASSPHRASE`, or such data unencrypted | `TRANSIENT_ERROR`: Chromium keeps the entity and commits it again later. Deletions, the Nigori node and never-encrypted types such as device info pass |
+
+Deletions are always accepted. The limits on requests:
+
+| Limit | Answer |
+|---|---|
+| `RATE_LIMIT_PER_MINUTE` per chain, `RATE_LIMIT_PER_IP_PER_MINUTE` per client address | `THROTTLED` with `throttle_delay_seconds` |
+| `NEW_CHAINS_PER_IP_PER_DAY`, on the request that would create a chain | `THROTTLED` until the address may create one |
+| `MAX_CHAINS` | `TRANSIENT_ERROR` on a new chain's first request |
+| No free slot of `MAX_CONCURRENT_REQUESTS` within 10 seconds | HTTP 503 with `Retry-After` |
+| A body that takes longer than `BODY_READ_TIMEOUT` | HTTP 408. Bodies are read before a request takes a slot |
+
+A client address is the connection's, or the one `TRUSTED_PROXY` proxies name
+in `CLIENT_IP_HEADER`. IPv6 clients count by their /64.
 
 ## Events
 
@@ -79,7 +122,10 @@ stream:
 | `resync` | `{}` | The server may have lost events. Fetch updates of all data types |
 
 A device is not told about its own commits; the server recognizes it by the
-cache GUID of the commit. A comment line every 25 seconds keeps proxies from
+cache GUID of the commit. A stream of a chain that does not exist yet gets HTTP
+404: the device's first GetUpdates creates the chain, and the device connects
+again. Streams over `MAX_EVENT_STREAMS` per chain or `MAX_EVENT_STREAMS_PER_IP`
+per address get 429; at shutdown, streams end and new ones get 503. A comment line every 25 seconds keeps proxies from
 closing the stream, and `retry: 5000` tells the client to reconnect after 5
 seconds. Events are hints: a client that misses one still gets the change on its
 next poll, which the server sets to once an hour.
@@ -88,16 +134,33 @@ next poll, which the server sets to once an hour.
 
 | Table | Contents |
 |---|---|
-| `chains` | Chain ID, birthday, keystore key, version counter, entity count |
-| `entities` | Each entity as the client committed it, with its server ID and version |
+| `chains` | Chain ID, birthday, keystore key, version counter, entity count, size, whether the Nigori node says custom passphrase, when a device last talked to the server |
+| `chain_types` | Per chain and data type: highest version, highest removed tombstone, live entities, tombstones, size |
+| `chain_count` | The number of chains, kept by a trigger |
+| `entities` | Each entity as the client committed it, with its server ID, version and the time it was written |
 
 **Encryption.** With a sync passphrase, Chromium encrypts every data type with a
 key derived from the passphrase. The server then stores only ciphertext, plus
 what Chromium leaves in the clear: entity IDs, versions, times and the bookmark
 tree structure. Without a passphrase, Chromium encrypts only passwords and a few
 other types, with the keystore key, which the server holds: the server operator
-can read all of it.
+can read all of it. `REQUIRE_CUSTOM_PASSPHRASE` makes the server refuse such
+data.
 
 **Deletions.** A deleted entity stays as a tombstone with its data removed, so
-devices that were offline learn about the deletion. Tombstones are only removed
-with their chain.
+devices that were offline learn about the deletion, for `TOMBSTONE_TTL` (60
+days). After that the server removes it, and a device that has not synced
+since downloads the data type again, as described under
+[Removed tombstones](#the-sync-protocol).
+
+**Retention.** A job removes, every `RETENTION_INTERVAL`:
+
+| What | After | Why |
+|---|---|---|
+| Tombstones | `TOMBSTONE_TTL`, 60 days | See above |
+| History and history delete directives | `HISTORY_TTL`, 90 days since they were last written | Chromium keeps 90 days of history and sends nothing when a visit expires: Google's server expires history itself, and so does this one. A directive outlives the history it deletes |
+| Chains no device committed to | `EMPTY_CHAIN_TTL`, 7 days | Every Chromium device commits its device info right away; a chain with only its permanent entities was never used |
+| Chains no device talked to | `INACTIVE_CHAIN_TTL`, off by default | Abandoned chains on a public server |
+
+Removing data takes the chain's lock, one chain at a time, so it never races a
+commit. With several instances, one runs the job at a time.
