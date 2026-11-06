@@ -218,3 +218,51 @@ func TestCreateGate(t *testing.T) {
 		t.Fatalf("existing chain: %v", got)
 	}
 }
+
+func TestRequireCustomPassphrase(t *testing.T) {
+	s, _ := newService(t, func(l *Limits) { l.RequireCustomPassphrase = true })
+	a := newDevice(t, s, "a")
+	tags := byTag(a.updates(bookmarkType, nigoriType))
+
+	deviceInfo := &pb.SyncEntity{
+		IdString: proto.String("d"), ClientTagHash: proto.String("d"),
+		Specifics: &pb.EntitySpecifics{SpecificsVariant: &pb.EntitySpecifics_DeviceInfo{
+			DeviceInfo: &pb.DeviceInfoSpecifics{CacheGuid: proto.String("a")},
+		}},
+	}
+	if got := a.commitOne(deviceInfo).GetResponseType(); got != pb.CommitResponse_SUCCESS {
+		t.Fatalf("device info before the passphrase: %v", got)
+	}
+	if got := a.commitOne(bookmark("c1", "bookmark_bar", "x")).GetResponseType(); got != pb.CommitResponse_TRANSIENT_ERROR {
+		t.Fatalf("bookmark before the passphrase: %v", got)
+	}
+
+	encrypted := bookmark("c2", "bookmark_bar", "")
+	encrypted.Specifics = &pb.EntitySpecifics{
+		Encrypted:        &pb.EncryptedData{KeyName: proto.String("k"), Blob: proto.String("ciphertext")},
+		SpecificsVariant: &pb.EntitySpecifics_Bookmark{Bookmark: &pb.BookmarkSpecifics{}},
+	}
+	// The passphrase and the first encrypted data in one commit, data first.
+	nigori := proto.CloneOf(tags["google_chrome_nigori"])
+	nigori.Specifics = &pb.EntitySpecifics{SpecificsVariant: &pb.EntitySpecifics_Nigori{
+		Nigori: &pb.NigoriSpecifics{PassphraseType: proto.Int32(int32(pb.NigoriSpecifics_CUSTOM_PASSPHRASE))},
+	}}
+	answers := a.commit(encrypted, nigori).GetCommit().GetEntryresponse()
+	for i, answer := range answers {
+		if answer.GetResponseType() != pb.CommitResponse_SUCCESS {
+			t.Fatalf("commit %d with the passphrase: %v %s", i, answer.GetResponseType(), answer.GetErrorMessage())
+		}
+	}
+	if !chainState(t, s).CustomPassphrase {
+		t.Fatal("the chain does not know its passphrase")
+	}
+	if got := a.commitOne(bookmark("c3", "bookmark_bar", "plain")).GetResponseType(); got != pb.CommitResponse_TRANSIENT_ERROR {
+		t.Fatalf("unencrypted bookmark after the passphrase: %v", got)
+	}
+	deletion := deleted(encrypted, answers[0].GetVersion())
+	deletion.IdString = answers[0].IdString
+	deletion.Specifics = &pb.EntitySpecifics{SpecificsVariant: &pb.EntitySpecifics_Bookmark{}}
+	if got := a.commitOne(deletion).GetResponseType(); got != pb.CommitResponse_SUCCESS {
+		t.Fatalf("deletion: %v", got)
+	}
+}

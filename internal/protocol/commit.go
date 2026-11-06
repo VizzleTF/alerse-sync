@@ -15,6 +15,9 @@ import (
 
 type entryResponse = pb.CommitResponse_EntryResponse
 
+// nigoriID is the ID of the chain's Nigori node, a permanent entity.
+const nigoriID = "google_chrome_nigori"
+
 // commit stores the entities of a commit in one transaction and answers each
 // one. An entity whose version differs from the stored one is a conflict:
 // the client fetches the newer one and resolves it.
@@ -61,21 +64,39 @@ type committer struct {
 	responses []*entryResponse
 	written   []int32
 	evicted   int64
+	// custom caches whether the chain has a custom passphrase.
+	custom *bool
 }
 
 func (c *committer) commit(ctx context.Context, entries []*pb.SyncEntity) error {
 	// One read for all the stored entities the commit names.
-	ids := make([]string, 0, len(entries))
+	ids := make([]string, 0, len(entries)+1)
 	for _, entry := range entries {
 		if id, ok := entityID(entry, dataTypeOf(entry.GetSpecifics())); ok {
 			ids = append(ids, id)
 		}
 	}
+	if c.service.limits.RequireCustomPassphrase && !c.tx.Chain().CustomPassphrase {
+		ids = append(ids, nigoriID)
+	}
 	if err := c.tx.Prefetch(ctx, ids); err != nil {
 		return err
 	}
 
-	for i := range entries {
+	// The Nigori node goes first: setting a passphrase lets the data that
+	// comes with it in.
+	order := make([]int, 0, len(entries))
+	for i, entry := range entries {
+		if dataTypeOf(entry.GetSpecifics()) == nigoriType {
+			order = append(order, i)
+		}
+	}
+	for i, entry := range entries {
+		if dataTypeOf(entry.GetSpecifics()) != nigoriType {
+			order = append(order, i)
+		}
+	}
+	for _, i := range order {
 		response, dataType, err := c.entry(ctx, entries[i])
 		if err != nil {
 			return err
@@ -119,6 +140,23 @@ func (c *committer) entry(ctx context.Context, entry *pb.SyncEntity) (*entryResp
 	if commitOnlyTypes[dataType] {
 		return succeeded(entry.GetIdString(), 1), 0, nil
 	}
+	if limits.RequireCustomPassphrase && encryptableTypes[dataType] && !entry.GetDeleted() {
+		custom, err := c.customPassphrase(ctx)
+		if err != nil {
+			return nil, 0, err
+		}
+		switch {
+		case !custom:
+			// Chromium keeps the entity and commits it again later, by
+			// which time the passphrase is set.
+			return rejected(pb.CommitResponse_TRANSIENT_ERROR,
+				"this server keeps only data encrypted with a sync passphrase; set one first"), 0, nil
+		case entry.GetSpecifics().GetEncrypted() == nil:
+			return rejected(pb.CommitResponse_TRANSIENT_ERROR,
+				"this server keeps only data encrypted with the sync passphrase"), 0, nil
+		}
+	}
+
 	id, ok := entityID(entry, dataType)
 	if !ok {
 		id = rand.Text()
@@ -176,6 +214,11 @@ func (c *committer) entry(ctx context.Context, entry *pb.SyncEntity) (*entryResp
 	})
 	if err != nil {
 		return nil, 0, err
+	}
+	if dataType == nigoriType {
+		custom := isCustomPassphrase(stored.GetSpecifics())
+		c.tx.SetCustomPassphrase(custom)
+		c.custom = &custom
 	}
 	c.serverIDs[entry.GetIdString()] = id
 	return succeeded(id, stored.GetVersion()), dataType, nil
@@ -255,6 +298,39 @@ func (c *committer) quota(ctx context.Context, dataType int32, existing *store.E
 	c.evicted += n
 	refusal, _, _ = check()
 	return refusal, nil
+}
+
+// customPassphrase reports whether the chain's Nigori node says its data is
+// encrypted with a custom passphrase.
+func (c *committer) customPassphrase(ctx context.Context) (bool, error) {
+	if c.custom != nil {
+		return *c.custom, nil
+	}
+	custom := c.tx.Chain().CustomPassphrase
+	if !custom {
+		// Chains from before the server tracked it.
+		nigori, err := c.tx.Get(ctx, nigoriID)
+		if err != nil {
+			return false, err
+		}
+		if nigori != nil {
+			entity := &pb.SyncEntity{}
+			if err := proto.Unmarshal(nigori.Data, entity); err != nil {
+				return false, fmt.Errorf("nigori node: %w", err)
+			}
+			if custom = isCustomPassphrase(entity.GetSpecifics()); custom {
+				c.tx.SetCustomPassphrase(true)
+			}
+		}
+	}
+	c.custom = &custom
+	return custom, nil
+}
+
+// isCustomPassphrase reports whether Nigori specifics, which are never
+// encrypted, say the data is encrypted with a key the server does not have.
+func isCustomPassphrase(specifics *pb.EntitySpecifics) bool {
+	return pb.NigoriSpecifics_PassphraseType(specifics.GetNigori().GetPassphraseType()) == pb.NigoriSpecifics_CUSTOM_PASSPHRASE
 }
 
 // storedEntity returns the entity to store for a commit of entry over

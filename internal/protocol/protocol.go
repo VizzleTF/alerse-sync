@@ -46,6 +46,10 @@ type Limits struct {
 	PollInterval time.Duration
 	// CommitBatchSize is the number of entities a client puts in a commit.
 	CommitBatchSize int
+	// RequireCustomPassphrase refuses data a client could encrypt until the
+	// chain's Nigori node says it is encrypted with a custom passphrase, and
+	// unencrypted data of such types after that.
+	RequireCustomPassphrase bool
 }
 
 // DefaultLimits suit a server for a few thousand chains.

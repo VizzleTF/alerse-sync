@@ -49,6 +49,19 @@ func groupOf(dataType int32) quotaGroup {
 	return otherGroup
 }
 
+// encryptableTypes are the data types Chromium encrypts when the chain has
+// a custom passphrase (EncryptableUserTypes in components/sync/base/
+// data_type.cc). The others, like device info and the Nigori node itself,
+// are never encrypted.
+var encryptableTypes = map[int32]bool{
+	31729: true, 32904: true, 37702: true, 41210: true, 45873: true, 48119: true, 48364: true,
+	50119: true, 63951: true, 88610: true, 96159: true, 103656: true, 150251: true, 170540: true,
+	229170: true, 330441: true, 340906: true, 410745: true, 411028: true, 601980: true, 662827: true,
+	673225: true, 702141: true, 874841: true, 895275: true, 963985: true, 974304: true, 1004874: true,
+	1164238: true, 1281100: true, 1329438: true, 1429255: true, 1517585: true, 1518931: true,
+	1569348: true, 1577986: true, 1587331: true, 1656053: true,
+}
+
 // commitOnlyTypes are data types clients send and never fetch (Chromium's
 // CommitOnlyTypes): user events, user consents, security events, sharing
 // messages, password sharing invitations and encrypted tab context items.
