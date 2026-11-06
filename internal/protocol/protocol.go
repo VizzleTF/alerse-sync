@@ -20,15 +20,27 @@ import (
 )
 
 // Limits bounds what one chain may store and how clients talk to the server.
+// A limit of 0 means no limit.
 type Limits struct {
-	// MaxEntities is the number of live entities a chain may hold.
+	// MaxEntities is the number of live entities a chain may hold of the
+	// data types not counted below: bookmarks, passwords, settings and so on.
 	MaxEntities int64
+	// MaxBytes is the size of all entities a chain may store, tombstones
+	// included.
+	MaxBytes int64
+	// MaxHistoryEntities and MaxHistoryBytes bound browsing history. A
+	// commit beyond them removes the oldest visits instead of failing, as
+	// they would expire anyway.
+	MaxHistoryEntities int64
+	MaxHistoryBytes    int64
+	// MaxSessionEntities bounds the open tabs of the chain's devices.
+	MaxSessionEntities int64
 	// MaxEntityBytes is the largest entity a client may commit.
 	MaxEntityBytes int
 	// MaxUpdates and MaxUpdateBytes bound one GetUpdates response.
 	MaxUpdates     int
 	MaxUpdateBytes int
-	// MaxChains is the number of chains the server keeps; 0 for no limit.
+	// MaxChains is the number of chains the server keeps.
 	MaxChains int64
 	// PollInterval is how often clients poll when they get no events.
 	PollInterval time.Duration
@@ -38,12 +50,16 @@ type Limits struct {
 
 // DefaultLimits suit a server for a few thousand chains.
 var DefaultLimits = Limits{
-	MaxEntities:     250_000,
-	MaxEntityBytes:  256 << 10,
-	MaxUpdates:      500,
-	MaxUpdateBytes:  16 << 20,
-	PollInterval:    time.Hour,
-	CommitBatchSize: 100,
+	MaxEntities:        250_000,
+	MaxBytes:           256 << 20,
+	MaxHistoryEntities: 100_000,
+	MaxHistoryBytes:    64 << 20,
+	MaxSessionEntities: 20_000,
+	MaxEntityBytes:     256 << 10,
+	MaxUpdates:         500,
+	MaxUpdateBytes:     16 << 20,
+	PollInterval:       time.Hour,
+	CommitBatchSize:    100,
 }
 
 // Notifier tells a chain's other devices which data types changed.
@@ -57,11 +73,36 @@ type Service struct {
 	notifier Notifier
 	limits   Limits
 	now      func() time.Time
+	options
+}
+
+type options struct {
+	allowCreate func(context.Context) (bool, time.Duration)
+	evicted     func(int64)
+}
+
+// Option changes how a Service works.
+type Option func(*options)
+
+// WithCreateGate has the service ask allow before a request creates a chain.
+// When it refuses, the client is throttled for the duration it returns.
+func WithCreateGate(allow func(ctx context.Context) (bool, time.Duration)) Option {
+	return func(o *options) { o.allowCreate = allow }
+}
+
+// WithEvictionObserver tells observe how many history entities a commit
+// removed to stay within the limits.
+func WithEvictionObserver(observe func(n int64)) Option {
+	return func(o *options) { o.evicted = observe }
 }
 
 // New returns a service. notifier may be nil.
-func New(st store.Store, notifier Notifier, limits Limits) *Service {
-	return &Service{store: st, notifier: notifier, limits: limits, now: time.Now}
+func New(st store.Store, notifier Notifier, limits Limits, opts ...Option) *Service {
+	s := &Service{store: st, notifier: notifier, limits: limits, now: time.Now}
+	for _, opt := range opts {
+		opt(&s.options)
+	}
+	return s
 }
 
 var (
@@ -72,6 +113,11 @@ var (
 	// MaxChains chains.
 	errFull = errors.New("the server has no room for another sync chain")
 )
+
+// throttled ends a request that has to wait before it may create a chain.
+type throttled struct{ wait time.Duration }
+
+func (throttled) Error() string { return "too many new sync chains" }
 
 // Handle answers one request of chain chainID. Problems with the request are
 // reported in the response; an error means the server failed.
@@ -85,6 +131,7 @@ func (s *Service) Handle(ctx context.Context, chainID string, msg *pb.ClientToSe
 	}
 
 	var err error
+	var wait throttled
 	switch msg.GetMessageContents() {
 	case pb.ClientToServerMessage_GET_UPDATES:
 		err = s.getUpdates(ctx, chainID, msg, rsp)
@@ -111,6 +158,8 @@ func (s *Service) Handle(ctx context.Context, chainID string, msg *pb.ClientToSe
 		return rsp, nil
 	case errors.Is(err, errFull):
 		return failure(pb.SyncEnums_TRANSIENT_ERROR, err.Error()), nil
+	case errors.As(err, &wait):
+		return Throttled(wait.wait), nil
 	case err != nil:
 		return nil, err
 	}

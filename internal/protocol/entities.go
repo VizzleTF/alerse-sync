@@ -14,10 +14,40 @@ import (
 
 // Data type IDs are the field numbers of EntitySpecifics.specifics_variant.
 const (
-	bookmarkType = 32904
-	nigoriType   = 47745
-	historyType  = 963985
+	bookmarkType               = 32904
+	nigoriType                 = 47745
+	sessionType                = 50119
+	historyDeleteDirectiveType = 150251
+	historyType                = 963985
 )
+
+// ExpiringTypes are the data types whose entities the server removes some
+// time after they were last written, as Google's server does: Chromium keeps
+// history for 90 days and sends no deletion when a visit expires, leaving
+// that to the server. Delete directives older than the history they delete
+// have nothing left to delete.
+var ExpiringTypes = []int32{historyType, historyDeleteDirectiveType}
+
+// quotaGroup is a set of data types that share a limit.
+type quotaGroup int
+
+const (
+	// otherGroup is everything below MaxEntities: bookmarks, passwords,
+	// settings and the rest.
+	otherGroup quotaGroup = iota
+	historyGroup
+	sessionGroup
+)
+
+func groupOf(dataType int32) quotaGroup {
+	switch dataType {
+	case historyType, historyDeleteDirectiveType:
+		return historyGroup
+	case sessionType:
+		return sessionGroup
+	}
+	return otherGroup
+}
 
 // commitOnlyTypes are data types clients send and never fetch (Chromium's
 // CommitOnlyTypes): user events, user consents, security events, sharing
@@ -53,6 +83,10 @@ var permanentEntities = []struct {
 	{"synced_bookmarks", "Synced Bookmarks", "google_chrome_bookmarks", bookmarkType, true},
 	{"google_chrome_nigori", "Nigori", rootParentID, nigoriType, false},
 }
+
+// EmptyChainVersion is the version of a chain no device committed to: it
+// holds only the permanent entities.
+var EmptyChainVersion = int64(len(permanentEntities))
 
 func createPermanentEntities(ctx context.Context, tx store.Tx, now int64) error {
 	for _, p := range permanentEntities {
@@ -127,18 +161,46 @@ func emptySpecifics(dataType int32) *pb.EntitySpecifics {
 }
 
 // Progress tokens tell the server which version of a data type a client has.
-// They are opaque to clients: a format byte and the version.
-const tokenFormat = 1
+// They are opaque to clients. An incremental token is a format byte and the
+// version. A client that downloads all entities of a type, the first time or
+// after the server removed tombstones it may not have seen, gets snapshot
+// tokens until it has them: the version it got to and the chain's version
+// when the download started. Tombstones are left out of that download.
+const (
+	tokenIncremental = 1
+	tokenSnapshot    = 2
+)
 
-func encodeToken(version int64) []byte {
-	return binary.BigEndian.AppendUint64([]byte{tokenFormat}, uint64(version))
+type token struct {
+	// after is the version the client has.
+	after int64
+	// until is set while the client downloads the entities up to it.
+	until int64
 }
 
-// decodeToken returns the version in token. An empty or unknown token means
-// the client has nothing yet.
-func decodeToken(token []byte) int64 {
-	if len(token) != 9 || token[0] != tokenFormat {
-		return 0
+func encodeToken(version int64) []byte {
+	return binary.BigEndian.AppendUint64([]byte{tokenIncremental}, uint64(version))
+}
+
+func encodeSnapshotToken(after, until int64) []byte {
+	token := binary.BigEndian.AppendUint64([]byte{tokenSnapshot}, uint64(after))
+	return binary.BigEndian.AppendUint64(token, uint64(until))
+}
+
+// decodeToken reads a token. An empty or unknown token means the client has
+// nothing yet.
+func decodeToken(raw []byte) token {
+	switch {
+	case len(raw) == 9 && raw[0] == tokenIncremental:
+		return token{after: max(int64(binary.BigEndian.Uint64(raw[1:])), 0)}
+	case len(raw) == 17 && raw[0] == tokenSnapshot:
+		t := token{
+			after: max(int64(binary.BigEndian.Uint64(raw[1:9])), 0),
+			until: max(int64(binary.BigEndian.Uint64(raw[9:])), 0),
+		}
+		if t.until > 0 && t.after <= t.until {
+			return t
+		}
 	}
-	return max(int64(binary.BigEndian.Uint64(token[1:])), 0)
+	return token{}
 }

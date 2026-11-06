@@ -9,7 +9,6 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/VizzleTF/arcomium-sync/internal/store/memory"
 	pb "github.com/VizzleTF/arcomium-sync/internal/syncpb"
 )
 
@@ -33,7 +32,7 @@ func newService(t *testing.T, change func(*Limits)) (*Service, *recorder) {
 		change(&limits)
 	}
 	rec := &recorder{}
-	return New(memory.New(), rec, limits), rec
+	return New(newStore(t), rec, limits), rec
 }
 
 // device is a client of the test chain that keeps its birthday and progress
@@ -460,13 +459,19 @@ func TestInvalidEntities(t *testing.T) {
 
 func TestTokens(t *testing.T) {
 	for _, v := range []int64{0, 1, 1 << 40} {
-		if got := decodeToken(encodeToken(v)); got != v {
-			t.Errorf("token of %d decodes to %d", v, got)
+		if got := decodeToken(encodeToken(v)); got != (token{after: v}) {
+			t.Errorf("token of %d decodes to %+v", v, got)
+		}
+		if got := decodeToken(encodeSnapshotToken(v, v+5)); got != (token{after: v, until: v + 5}) {
+			t.Errorf("snapshot token of %d decodes to %+v", v, got)
 		}
 	}
-	for _, token := range [][]byte{nil, {}, []byte("garbage"), {2, 0, 0, 0, 0, 0, 0, 0, 1}} {
-		if got := decodeToken(token); got != 0 {
-			t.Errorf("token %x decodes to %d, want 0", token, got)
+	for _, raw := range [][]byte{
+		nil, {}, []byte("garbage"), {2, 0, 0, 0, 0, 0, 0, 0, 1}, {3, 0, 0, 0, 0, 0, 0, 0, 1},
+		encodeSnapshotToken(5, 4), encodeSnapshotToken(0, 0),
+	} {
+		if got := decodeToken(raw); got != (token{}) {
+			t.Errorf("token %x decodes to %+v, want nothing", raw, got)
 		}
 	}
 }
