@@ -1,23 +1,55 @@
-# Self-hosted Arcomium sync: the server and its Postgres.
+# Self-hosted Arcomium sync over HTTPS: the server, its Postgres, and Caddy,
+# which gets a certificate for SYNC_DOMAIN from Let's Encrypt.
 #
-#   POSTGRES_PASSWORD=change-me docker compose up -d
+#   SYNC_DOMAIN=sync.example.com POSTGRES_PASSWORD=change-me docker compose up -d
 #
-# Then set Arcomium's sync server to http://<this host>:8295/v2.
+# SYNC_DOMAIN has to point at this host, with ports 80 and 443 open. Then set
+# Arcomium's sync server to https://<SYNC_DOMAIN>/v2.
+#
+# Without a domain, on a home network or behind Tailscale: remove the caddy
+# service and uncomment the ports of sync below. Plain HTTP is for loopback
+# or a private network only.
 services:
+  caddy:
+    image: caddy:2@sha256:ce773ec7a742ce15ee6bf2bb5f65882b9e2a4487b10733e6f1484f86e6b5d8bc
+    restart: unless-stopped
+    command: caddy reverse-proxy --from ${SYNC_DOMAIN:?set SYNC_DOMAIN} --to sync:8295
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy:/data
+    depends_on:
+      sync:
+        condition: service_healthy
+
   sync:
     image: ghcr.io/vizzletf/arcomium-sync:latest
     build: .
     restart: unless-stopped
-    ports:
-      - "8295:8295"
+    # Only Caddy reaches the server. To reach it directly from this host:
+    # ports:
+    #   - "127.0.0.1:8295:8295"
     environment:
       DATABASE_URL: postgres://arcomium:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/arcomium?sslmode=disable
+      # Caddy names the client in X-Forwarded-For. Only containers of this
+      # project can connect, so the private ranges are Caddy.
+      TRUSTED_PROXY: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+    healthcheck:
+      test: ["CMD", "/arcomium-sync", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    # Requests in progress get up to 30 seconds to finish.
+    stop_grace_period: 40s
     depends_on:
       postgres:
         condition: service_healthy
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
     restart: unless-stopped
     environment:
       POSTGRES_USER: arcomium
@@ -31,4 +63,5 @@ services:
       retries: 10
 
 volumes:
+  caddy:
   postgres:
