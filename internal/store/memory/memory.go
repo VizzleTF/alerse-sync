@@ -126,7 +126,7 @@ func (s *Store) since(chainID string, change store.Change) []store.Entity {
 	var changes []store.Entity
 	for _, e := range c.entities {
 		if e.DataType == change.DataType && e.Version > change.After &&
-			(change.Until == 0 || e.Version <= change.Until) && !(change.LiveOnly && e.Deleted) {
+			(change.Until == 0 || e.Version <= change.Until) && (!change.LiveOnly || !e.Deleted) {
 			changes = append(changes, e.Entity)
 		}
 	}

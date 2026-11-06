@@ -65,12 +65,12 @@ func healthcheck() int {
 		port = "8295"
 	}
 	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get("http://127.0.0.1:" + port + "/readyz")
+	resp, err := client.Get("http://127.0.0.1:" + port + "/readyz") //nolint:gosec // the server's own port on loopback
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		fmt.Fprintln(os.Stderr, "not ready:", resp.Status)
 		return 1

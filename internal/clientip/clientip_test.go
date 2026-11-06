@@ -1,6 +1,7 @@
 package clientip
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"testing"
@@ -34,7 +35,7 @@ func TestAddr(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", "/", nil)
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req.RemoteAddr = test.remote
 			for _, value := range test.headers {
 				req.Header.Add("X-Forwarded-For", value)

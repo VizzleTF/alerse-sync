@@ -33,7 +33,7 @@ func Start(ctx context.Context) (pool *pgxpool.Pool, stop func(), err error) {
 		DataPath(filepath.Join(dir, "data")).
 		Logger(io.Discard))
 	if err := db.Start(); err != nil {
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		return nil, nil, fmt.Errorf("start postgres: %w", err)
 	}
 	stop = func() {
@@ -41,7 +41,7 @@ func Start(ctx context.Context) (pool *pgxpool.Pool, stop func(), err error) {
 			pool.Close()
 		}
 		_ = db.Stop()
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 	}
 	pool, err = pgxpool.New(ctx, fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres", port))
 	if err != nil {

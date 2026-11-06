@@ -18,7 +18,10 @@ linters:
         - (*compress/gzip.Reader).Close
         - (net.Listener).Close
         - os.RemoveAll
+        - fmt.Fprint
+        - fmt.Fprintf
         - fmt.Fprintln
+        - (net.Conn).Close
     gosec:
       excludes:
         - G115 # integer conversions are bounded by protocol limits
