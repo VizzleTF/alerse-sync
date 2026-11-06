@@ -12,15 +12,33 @@ import (
 	"github.com/VizzleTF/arcomium-sync/internal/store"
 )
 
-// collectChains is how many chains Collect works on per round.
-const collectChains = 100
+const (
+	// collectChains is how many chains Collect works on per round.
+	collectChains = 100
+	// collectLock keeps server instances from collecting at the same time.
+	collectLock = migrationLock + 1
+)
 
 // Collect removes what r says is due. Removing entities takes the chain's
-// lock, one chain at a time, so it never races a commit.
+// lock, one chain at a time, so it never races a commit. While another
+// server instance collects, it does nothing.
 func (s *Store) Collect(ctx context.Context, r store.Retention) (store.Collected, error) {
 	var done store.Collected
 	batch := max(r.Batch, 1)
-	var err error
+
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return done, err
+	}
+	defer conn.Release()
+	var locked bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, collectLock).Scan(&locked); err != nil {
+		return done, fmt.Errorf("lock collection: %w", err)
+	}
+	if !locked {
+		return done, nil
+	}
+	defer conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, collectLock) //nolint:errcheck // the lock ends with the session anyway
 
 	if r.EmptyChainTTL > 0 {
 		// The constant in the condition matches the partial index.
