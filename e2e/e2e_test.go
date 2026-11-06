@@ -14,17 +14,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 
@@ -34,77 +31,61 @@ import (
 	"github.com/VizzleTF/arcomium-sync/internal/server"
 	"github.com/VizzleTF/arcomium-sync/internal/store/postgres"
 	pb "github.com/VizzleTF/arcomium-sync/internal/syncpb"
+	"github.com/VizzleTF/arcomium-sync/internal/testpg"
 )
 
 const bookmarkType = 32904
 
-var serverURL string
+var (
+	serverURL string
+	pool      *pgxpool.Pool
+	st        *postgres.Store
+	testLog   = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+)
 
 func TestMain(m *testing.M) {
 	os.Exit(run(m))
 }
 
 func run(m *testing.M) int {
-	port := freePort()
-	dir, err := os.MkdirTemp("", "arcomium-sync-e2e")
+	var stop func()
+	var err error
+	pool, stop, err = testpg.Start(context.Background())
 	if err != nil {
 		fmt.Println(err)
 		return 1
 	}
-	defer os.RemoveAll(dir)
-	db := embeddedpostgres.NewDatabase(embeddedpostgres.DefaultConfig().
-		Port(uint32(port)).
-		RuntimePath(filepath.Join(dir, "runtime")).
-		DataPath(filepath.Join(dir, "data")).
-		Logger(io.Discard))
-	if err := db.Start(); err != nil {
-		fmt.Println("start postgres:", err)
-		return 1
-	}
-	defer db.Stop() //nolint:errcheck // the test is over
-
+	defer stop()
+	st = postgres.New(pool)
+	// Listeners end before Postgres stops, or it waits for them.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	pool, err := pgxpool.New(ctx, fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres", port))
-	if err != nil {
-		fmt.Println(err)
-		return 1
-	}
-	defer pool.Close()
-	st := postgres.New(pool)
-	// Running the migrations twice must be harmless: every start runs them.
-	for range 2 {
-		if err := st.Migrate(ctx); err != nil {
-			fmt.Println("migrate:", err)
-			return 1
-		}
-	}
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	hub := events.New(pool, log, 8, 100)
-	go hub.Listen(ctx)
-	srv := httptest.NewUnstartedServer(server.Handler(server.Config{
-		Service: protocol.New(st, hub, protocol.DefaultLimits),
-		Events:  hub,
-		Health:  st.Ping,
-		Log:     log,
-	}))
-	srv.Config.BaseContext = func(net.Listener) context.Context { return ctx }
+	srv, hub := newInstance(ctx)
 	srv.Start()
-	// Event streams end with ctx, before Close waits for them.
 	defer srv.Close()
-	defer cancel()
+	defer hub.Close()
 	serverURL = srv.URL + "/v2"
 	return m.Run()
 }
 
-func freePort() int {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		panic(err)
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+// newInstance returns a server instance on the shared database, set up as
+// the command sets it up.
+func newInstance(ctx context.Context) (*httptest.Server, *events.Hub) {
+	hub := events.New(pool, testLog, 8, 100)
+	go hub.Listen(ctx)
+	srv := httptest.NewUnstartedServer(server.Handler(server.Config{
+		Service: protocol.New(st, hub, protocol.DefaultLimits),
+		Events:  hub,
+		ChainExists: func(ctx context.Context, chainID string) (bool, error) {
+			_, ok, err := st.Chain(ctx, chainID)
+			return ok, err
+		},
+		Health: st.Ping,
+		Log:    testLog,
+	}))
+	srv.Config.RegisterOnShutdown(hub.Close)
+	return srv, hub
 }
 
 // device is a client of a sync chain, speaking the protocol over HTTP.
@@ -114,6 +95,15 @@ type device struct {
 	guid     string
 	birthday string
 	token    []byte
+	// url is the server's, if not serverURL.
+	url string
+}
+
+func (d *device) server() string {
+	if d.url != "" {
+		return d.url
+	}
+	return serverURL
 }
 
 func newChain(t *testing.T) ed25519.PrivateKey {
@@ -135,7 +125,7 @@ func (d *device) send(msg *pb.ClientToServerMessage) *pb.ClientToServerResponse 
 	if err != nil {
 		d.t.Fatal(err)
 	}
-	req, _ := http.NewRequest(http.MethodPost, serverURL+"/command/?client=Chromium", bytes.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, d.server()+"/command/?client=Chromium", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+auth.NewToken(d.key, time.Now()))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -208,7 +198,7 @@ func bookmark(id, title string) *pb.SyncEntity {
 // events opens the device's event stream and returns its "event data" lines.
 func (d *device) events(ctx context.Context) <-chan string {
 	d.t.Helper()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, serverURL+"/events?cache_guid="+d.guid, nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, d.server()+"/events?cache_guid="+d.guid, nil)
 	req.Header.Set("Authorization", "Bearer "+auth.NewToken(d.key, time.Now()))
 	resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // the reader below closes it
 	if err != nil {
