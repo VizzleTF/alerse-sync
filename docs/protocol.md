@@ -86,6 +86,11 @@ sharing invitations), are accepted and dropped.
 one ID per tag. If two devices create it, the second commit conflicts instead
 of making a duplicate.
 
+**History.** Chromium's history bridge forgets a visit's version once it is
+committed, so a later change to the visit arrives with version 0. Such a commit
+replaces the stored visit instead of conflicting, as on Google's server. Other
+types conflict, except a deleted entity created again from version 0.
+
 **Limits.** Commits are answered per entity:
 
 | Limit | Answer |

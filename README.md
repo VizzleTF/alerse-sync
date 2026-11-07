@@ -2,8 +2,8 @@
 
 The sync server of [Arcomium](https://github.com/VizzleTF/arcomium). It syncs
 bookmarks, tabs, history, passwords and settings between your devices and tells
-them about changes right away. You can use the public server or run your own;
-it needs only PostgreSQL.
+them about changes right away. You run it yourself, for one household or more;
+it needs only PostgreSQL. A free public server is planned.
 
 - **No account.** Devices join a sync chain with its sync code. The server
   knows the chain by a key derived from the code, never the code itself.
@@ -164,6 +164,10 @@ go test -p 1 -tags integration ./...       # also on Postgres, which the tests d
 go test -fuzz FuzzHandle ./internal/protocol/
 go run ./cmd/arcomium-sync                 # needs DATABASE_URL
 ```
+
+CI runs the tests with `-race` on Postgres, `govulncheck` and golangci-lint. Releases
+build the multi-arch image with an SBOM and build provenance, from base images and
+actions pinned by digest.
 
 The protocol definitions in `proto/` come from Chromium. After moving Arcomium
 to a new Chromium version, refresh them with `scripts/update-protos.sh
