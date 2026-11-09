@@ -7,6 +7,10 @@ it needs only PostgreSQL. A free public server is planned.
 
 - **No account.** Devices join a sync chain with its sync code. The server
   knows the chain by a key derived from the code, never the code itself.
+- **Optional sign-in.** A chain may add a login name and password, so new
+  devices can join without typing the code. The device encrypts the code with
+  a key from the password; the server never sees the login name, the password
+  or the code.
 - **End-to-end encrypted** when the chain sets a passphrase: the server stores
   data it cannot read, and can be told to refuse anything else.
 - **Real-time.** A device that commits a change wakes the chain's other devices
@@ -79,6 +83,10 @@ or duration of `0` turns it off.
 | `RATE_LIMIT_PER_MINUTE` | `600` | Requests per sync chain |
 | `RATE_LIMIT_PER_IP_PER_MINUTE` | `1200` | Requests per client address (IPv6: per /64) |
 | `NEW_CHAINS_PER_IP_PER_DAY` | `10` | Sync chains one address may create |
+| `LOGIN_ATTEMPTS_PER_HOUR` | `10` | Sign-in attempts per login name, right or wrong |
+| `LOGIN_ATTEMPTS_PER_IP_PER_HOUR` | `30` | Sign-in attempts per client address |
+| `LOGIN_LOOKUPS_PER_IP_PER_HOUR` | `120` | Sign-in parameter lookups per client address |
+| `LOGIN_CHANGES_PER_HOUR` | `30` | Sign-in reads and changes per sync chain |
 | `MAX_CHAINS` | `0` | Sync chains the server keeps |
 | `MAX_CONCURRENT_REQUESTS` | `64` | Protocol requests handled at once, which bounds memory |
 | `BODY_READ_TIMEOUT` | `20s` | Time a client has to send a request body |
@@ -121,13 +129,15 @@ METRICS_ADDR=127.0.0.1:9295
 |---|---|
 | `POST /v2/command/` | Chromium sync protocol |
 | `GET /v2/events` | Change events of a sync chain |
+| `/v2/login` | Optional sign-in with a login name and password: set, change, remove, and join with it |
 | `GET /health` | `200 ok` while the database answers, `503` otherwise |
 | `GET /livez` | `200` while the process runs |
 | `GET /readyz` | `200` while the server takes requests; `503` when the database is down or it is shutting down |
 | `GET /metrics` | Prometheus metrics, on `METRICS_ADDR` only |
 
-Clients authenticate both `/v2` endpoints with a signed token. The token format,
-the events, the limits and what the server keeps are in
+Clients authenticate the `/v2` endpoints with a signed token, except the two
+sign-in requests of a device that joins. The token format, the events, the
+sign-in, the limits and what the server keeps are in
 [How the server works](docs/protocol.md).
 
 ## Operate

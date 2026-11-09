@@ -115,6 +115,86 @@ Deletions are always accepted. The limits on requests:
 A client address is the connection's, or the one `TRUSTED_PROXY` proxies name
 in `CLIENT_IP_HEADER`. IPv6 clients count by their /64.
 
+## Sign-in with a login name and password
+
+A chain may also have one sign-in, so that a new device can join with a login
+name (an email address or any other name) and a password instead of the 24
+words. It is optional, and the words keep working. The server stays
+zero-knowledge: it never sees the login name, the password or the chain's
+secret, only values derived from them on the device. `internal/login`
+implements the server side.
+
+**What the client derives** (scheme `pw-v1`):
+
+```text
+login  = the login name, without surrounding spaces, ASCII letters in lower case
+id     = hex(SHA-256("arcomium-sync-login-id-v1" | 0x00 | login))
+salt   = 32 random bytes, chosen by the client when it sets the sign-in
+master = scrypt(password, "arcomium-sync-login-v1" | 0x00 | id | salt, N, r, p, 32 bytes)
+auth   = HKDF-SHA256(master, info "arcomium-sync-login-auth"), 32 bytes
+enc    = HKDF-SHA256(master, info "arcomium-sync-login-enc"), 32 bytes
+secret = 0x01 | nonce (12) | AES-256-GCM(enc, nonce, chain secret, aad "arcomium-sync-login-v1" | id)
+```
+
+scrypt with N = 2^17, r = 8, p = 1 (128 MiB) is the default. Argon2id would
+be the first choice, but Chromium's tree has no Argon2, and scrypt is in its
+BoringSSL. The server sends `auth` to prove the password and never gets
+`enc`, which alone opens the secret.
+
+**Requests.** Bodies are JSON; byte strings are standard base64.
+
+| Request | Auth | Body | Answer |
+|---|---|---|---|
+| `POST /v2/login/params` | none | `{"id"}` | `{"scheme","salt","kdf":{"name":"scrypt","n","r","p"}}` |
+| `POST /v2/login/unlock` | none | `{"id","auth"}` | `{"secret"}`, or 401 `wrong login or password` |
+| `GET /v2/login` | token | | `{"id","scheme","kdf","updated"}`, or 404 when the chain has none |
+| `PUT /v2/login` | token | `{"id","scheme","salt","kdf","auth","secret"}` | 204; 409 when another chain has the login |
+| `DELETE /v2/login` | token | | 204 |
+
+`PUT` sets the chain's sign-in, replacing its earlier one: a new password or a
+new login name. It only wraps the same chain secret again; the chain's data
+stays as it is. If no device has synced yet, `PUT` creates the chain, under the
+limits of a first GetUpdates. A chain's sign-in goes when the chain goes:
+ClearServerData and the retention job remove it too.
+
+**What the server stores** (`logins`): the id, the chain, the scheme, the
+client's salt and KDF parameters, the wrapped secret, and
+Argon2id(`auth`, a random salt of its own; 19 MiB, 2 passes) rather than
+`auth` or a fast hash of it, so a copy of the database alone does not give a
+cheap way to test passwords. Unlock compares in constant time.
+
+**No enumeration.** For an id without a sign-in, params answers with the
+default KDF and a salt made up as HMAC-SHA256 of the id under a random server
+secret (kept in `server_secrets`, so every instance and restart answers the
+same), and unlock does the same Argon2id work before answering 401. One gap
+stays: `PUT` with a login another chain has answers 409, so whoever runs a
+chain can learn that a login name is in use, at `LOGIN_CHANGES_PER_HOUR`.
+
+**Rate limits.** Unlock attempts are limited per id (`LOGIN_ATTEMPTS_PER_HOUR`,
+10) and per client address (`LOGIN_ATTEMPTS_PER_IP_PER_HOUR`, 30), params per
+address (`LOGIN_LOOKUPS_PER_IP_PER_HOUR`, 120), and changes per chain
+(`LOGIN_CHANGES_PER_HOUR`, 30). Over a limit the answer is 429 with
+`Retry-After`. The per-id limit holds even for the right password, so someone
+who guesses at a login name can lock its owner out for an hour; the owner
+still has the words. Limits are per instance, like the others.
+
+**What it does not protect against.** The operator of the server, or anyone
+with its database, can test passwords offline: each guess costs one scrypt of
+128 MiB and an Argon2id. A long password is the only defence, so clients ask
+for at least 15 characters (NIST SP 800-63B-4) and refuse the most common
+ones. A server that sends weak KDF parameters could make a joining client
+send an `auth` that is cheap to attack, so clients refuse parameters below
+their own minimum. The sync code itself, 256 random bits, cannot be guessed.
+
+Login names are not verified: nobody checks that an email address belongs to
+whoever uses it, and the first chain to set a login name has it. On a public
+server, email addresses should be verified before they can be claimed; that
+comes with mail, which does not exist yet. Sending a chain's sync code by mail
+would expose it to the mail path and is undecided.
+
+Later schemes, such as OPAQUE (RFC 9807), which would also hide `auth` from
+the server, can be added next to `pw-v1`: every record names its scheme.
+
 ## Events
 
 `GET /v2/events?cache_guid=<the device's cache GUID>` opens a Server-Sent Events
@@ -143,6 +223,8 @@ next poll, which the server sets to once an hour.
 | `chain_types` | Per chain and data type: highest version, highest removed tombstone, live entities, tombstones, size |
 | `chain_count` | The number of chains, kept by a trigger |
 | `entities` | Each entity as the client committed it, with its server ID, version and the time it was written |
+| `logins` | A chain's optional sign-in: a hash of the login name, the client's salt and KDF parameters, an Argon2id hash of the authentication key, the chain secret encrypted on the device |
+| `server_secrets` | Random values shared by all instances, such as the key for made-up salts |
 
 **Encryption.** With a sync passphrase, Chromium encrypts every data type with a
 key derived from the passphrase. The server then stores only ciphertext, plus

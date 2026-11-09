@@ -24,6 +24,7 @@ import (
 
 	"github.com/VizzleTF/arcomium-sync/internal/clientip"
 	"github.com/VizzleTF/arcomium-sync/internal/events"
+	"github.com/VizzleTF/arcomium-sync/internal/login"
 	"github.com/VizzleTF/arcomium-sync/internal/metrics"
 	"github.com/VizzleTF/arcomium-sync/internal/protocol"
 	"github.com/VizzleTF/arcomium-sync/internal/ratelimit"
@@ -135,11 +136,28 @@ func run(ctx context.Context, log *slog.Logger) error {
 
 	chainLimiter := ratelimit.New(c.ratePerMinute)
 	addrLimiter := ratelimit.New(c.ratePerAddrPerMinute)
+	loginLimiters := []*ratelimit.Limiter{
+		ratelimit.NewPer(c.loginAttemptsPerHour, time.Hour),
+		ratelimit.NewPer(c.loginAttemptsPerAddr, time.Hour),
+		ratelimit.NewPer(c.loginLookupsPerAddr, time.Hour),
+		ratelimit.NewPer(c.loginChangesPerHour, time.Hour),
+	}
+	loginHandler := login.Handler(login.Config{
+		Store:        st,
+		EnsureChain:  service.EnsureChain,
+		Attempts:     loginLimiters[0],
+		AddrAttempts: loginLimiters[1],
+		Lookups:      loginLimiters[2],
+		Changes:      loginLimiters[3],
+		Log:          log,
+		Metrics:      m,
+	})
 	var ready atomic.Bool
 	ready.Store(true)
 	handler := server.Handler(server.Config{
 		Service:     service,
 		Events:      hub,
+		Login:       loginHandler,
 		Limiter:     chainLimiter,
 		AddrLimiter: addrLimiter,
 		ClientIP:    clientip.New(c.trustedProxies, c.clientIPHeader),
@@ -187,7 +205,11 @@ func run(ctx context.Context, log *slog.Logger) error {
 		m.Pool(pool)
 		m.Gauge("event_streams", "Open event streams on this instance.", func() float64 { return float64(hub.Streams()) })
 		m.Gauge("rate_limited_keys", "Chains and addresses the rate limiters track.", func() float64 {
-			return float64(chainLimiter.Keys() + addrLimiter.Keys() + newChains.Keys())
+			n := chainLimiter.Keys() + addrLimiter.Keys() + newChains.Keys()
+			for _, l := range loginLimiters {
+				n += l.Keys()
+			}
+			return float64(n)
 		})
 		m.Gauge("chains", "Sync chains on the server.", func() float64 {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

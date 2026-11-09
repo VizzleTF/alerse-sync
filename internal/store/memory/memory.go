@@ -20,6 +20,8 @@ type chain struct {
 	state    store.Chain
 	created  time.Time
 	entities map[string]entry
+	// login is the chain's sign-in, if any; it goes with the chain.
+	login *store.Login
 }
 
 // Store keeps chains in memory. Its zero value is not usable; call New.
@@ -27,8 +29,9 @@ type Store struct {
 	// Now is the store's clock, which tests may replace.
 	Now func() time.Time
 
-	mu     sync.Mutex
-	chains map[string]*chain
+	mu      sync.Mutex
+	chains  map[string]*chain
+	secrets map[string][]byte
 }
 
 // New returns an empty store.

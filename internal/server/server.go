@@ -2,6 +2,8 @@
 //
 //	POST /v2/command/   Chromium sync protocol (protobuf), authenticated
 //	GET  /v2/events     Server-Sent Events of a chain, authenticated
+//	/v2/login...        optional sign-in with a login name and password
+//	                    (internal/login)
 //	GET  /health        200 when the database answers
 //	GET  /livez         200 while the process runs
 //	GET  /readyz        200 when the server takes requests: the database
@@ -53,6 +55,8 @@ const (
 type Config struct {
 	Service *protocol.Service
 	Events  http.Handler
+	// Login serves /v2/login; nil leaves it out.
+	Login http.Handler
 	// Limiter limits requests per sync chain, AddrLimiter per client
 	// address; nil for no limit.
 	Limiter     *ratelimit.Limiter
@@ -95,6 +99,11 @@ func Handler(c Config) http.Handler {
 	mux.Handle("POST /v2/command/{$}", command)
 	mux.Handle("POST /v2/command", command)
 	mux.Handle("GET /v2/events", events)
+	if c.Login != nil {
+		login := h.limitAddr(false, c.Login)
+		mux.Handle("/v2/login", login)
+		mux.Handle("/v2/login/", login)
+	}
 	mux.HandleFunc("GET /health", h.health)
 	mux.HandleFunc("GET /livez", h.livez)
 	mux.HandleFunc("GET /readyz", h.readyz)
