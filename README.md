@@ -1,4 +1,10 @@
-# Arcomium Sync
+<p align="center">
+  <img src="https://raw.githubusercontent.com/VizzleTF/alerse/main/artwork/alerse_256.png" width="120" alt="The Alerse icon">
+</p>
+
+<h1 align="center">Alerse Sync</h1>
+
+<p align="center">The sync server of Alerse: end-to-end encrypted, no account, run by you.</p>
 
 The sync server of [Alerse](https://github.com/VizzleTF/alerse) (called Arcomium up to
 0.1.7; the binary, image and Go module keep the name arcomium-sync, and its protocol identifiers never
