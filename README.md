@@ -1,6 +1,8 @@
 # Arcomium Sync
 
-The sync server of [Arcomium](https://github.com/VizzleTF/arcomium). It syncs
+The sync server of [Alerse](https://github.com/VizzleTF/alerse) (called Arcomium up to
+0.1.7; the binary, image and Go module keep the name arcomium-sync, and its protocol identifiers never
+change). It syncs
 bookmarks, tabs, history, passwords and settings between your devices and tells
 them about changes right away. You run it yourself, for one household or more;
 it needs only PostgreSQL. A free public server is planned.
@@ -27,13 +29,13 @@ With Docker, on a host that a domain name points to, with ports 80 and 443
 open:
 
 ```sh
-curl -O https://raw.githubusercontent.com/VizzleTF/arcomium-sync/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/VizzleTF/alerse-sync/main/docker-compose.yml
 SYNC_DOMAIN=sync.example.com POSTGRES_PASSWORD=change-me docker compose up -d
 curl https://sync.example.com/health    # prints "ok"
 ```
 
 Caddy gets the certificate and forwards to the server, which is not exposed
-otherwise. Then set Arcomium's sync server to `https://sync.example.com/v2`.
+otherwise. Then set Alerse's (or Arcomium's) sync server to `https://sync.example.com/v2`.
 
 Without a domain, on a home network or behind Tailscale, remove the `caddy`
 service from `docker-compose.yml` and publish the server's port as the file
@@ -42,7 +44,7 @@ internet. A Cloudflare Tunnel also works; set `TRUSTED_PROXY` to the tunnel's
 address and `CLIENT_IP_HEADER=CF-Connecting-IP`.
 
 Without Docker, take the binary for your system from
-[Releases](https://github.com/VizzleTF/arcomium-sync/releases) and point it at a
+[Releases](https://github.com/VizzleTF/alerse-sync/releases) and point it at a
 Postgres database:
 
 ```sh
@@ -187,7 +189,7 @@ CI runs the tests with `-race` on Postgres, `govulncheck` and golangci-lint. Rel
 build the multi-arch image with an SBOM and build provenance, from base images and
 actions pinned by digest.
 
-The protocol definitions in `proto/` come from Chromium. After moving Arcomium
+The protocol definitions in `proto/` come from Chromium. After moving Alerse
 to a new Chromium version, refresh them with `scripts/update-protos.sh
 <chromium src>` (needs `protoc` and `protoc-gen-go`).
 

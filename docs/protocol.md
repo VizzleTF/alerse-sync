@@ -1,7 +1,7 @@
 # How the server works
 
 This page explains what the sync server expects from clients and what it keeps.
-It is for people working on Arcomium's sync client or running a server.
+It is for people working on Alerse's (formerly Arcomium's) sync client or running a server.
 
 ## Sync chains and tokens
 
