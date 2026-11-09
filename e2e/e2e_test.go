@@ -28,6 +28,7 @@ import (
 	"github.com/VizzleTF/arcomium-sync/internal/auth"
 	"github.com/VizzleTF/arcomium-sync/internal/events"
 	"github.com/VizzleTF/arcomium-sync/internal/login"
+	"github.com/VizzleTF/arcomium-sync/internal/pairing"
 	"github.com/VizzleTF/arcomium-sync/internal/protocol"
 	"github.com/VizzleTF/arcomium-sync/internal/server"
 	"github.com/VizzleTF/arcomium-sync/internal/store/postgres"
@@ -83,6 +84,7 @@ func newInstance(ctx context.Context) (*httptest.Server, *events.Hub) {
 			Store: st, EnsureChain: service.EnsureChain, Log: testLog,
 			Hash: login.Hash{Time: 1, Memory: 1024, Threads: 1},
 		}),
+		Pair: pairing.Handler(pairing.Config{Store: st, Log: testLog}),
 		ChainExists: func(ctx context.Context, chainID string) (bool, error) {
 			_, ok, err := st.Chain(ctx, chainID)
 			return ok, err

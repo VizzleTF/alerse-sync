@@ -22,18 +22,16 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
 	"golang.org/x/crypto/argon2"
 
 	"github.com/VizzleTF/arcomium-sync/internal/auth"
-	"github.com/VizzleTF/arcomium-sync/internal/clientip"
+	"github.com/VizzleTF/arcomium-sync/internal/jsonapi"
 	"github.com/VizzleTF/arcomium-sync/internal/metrics"
 	"github.com/VizzleTF/arcomium-sync/internal/protocol"
 	"github.com/VizzleTF/arcomium-sync/internal/ratelimit"
@@ -75,13 +73,11 @@ type Hash struct {
 var DefaultHash = Hash{Time: 2, Memory: 19 * 1024, Threads: 1}
 
 const (
-	idSize       = sha256.Size
-	authSize     = 32
-	minSaltSize  = 16
-	maxSaltSize  = 64
-	minSecret    = 16
-	maxSecret    = 512
-	maxBodyBytes = 4 << 10
+	authSize    = 32
+	minSaltSize = 16
+	maxSaltSize = 64
+	minSecret   = 16
+	maxSecret   = 512
 	// fakeSecret names the server secret that makes up salts and
 	// verifiers for login names without a login.
 	fakeSecret = "login-fake-salt"
@@ -164,11 +160,11 @@ type getResponse struct {
 }
 
 func (h *handler) params(w http.ResponseWriter, r *http.Request) {
-	if !h.allow(w, h.Lookups, addrKey(r)) {
+	if !h.allow(w, h.Lookups, jsonapi.AddrKey(r)) {
 		return
 	}
 	var req paramsRequest
-	if !readJSON(w, r, &req) || !validID(w, req.ID) {
+	if !jsonapi.Read(w, r, &req) || !jsonapi.ValidID(w, req.ID) {
 		return
 	}
 	l, ok, err := h.Store.Login(r.Context(), req.ID)
@@ -193,19 +189,19 @@ func (h *handler) params(w http.ResponseWriter, r *http.Request) {
 		}
 		rsp.Salt = fake
 	}
-	writeJSON(w, http.StatusOK, rsp)
+	jsonapi.Write(w, http.StatusOK, rsp)
 }
 
 func (h *handler) unlock(w http.ResponseWriter, r *http.Request) {
 	var req unlockRequest
-	if !readJSON(w, r, &req) || !validID(w, req.ID) {
+	if !jsonapi.Read(w, r, &req) || !jsonapi.ValidID(w, req.ID) {
 		return
 	}
-	if !h.allow(w, h.AddrAttempts, addrKey(r)) || !h.allow(w, h.Attempts, req.ID) {
+	if !h.allow(w, h.AddrAttempts, jsonapi.AddrKey(r)) || !h.allow(w, h.Attempts, req.ID) {
 		return
 	}
 	if len(req.Auth) != authSize {
-		writeError(w, http.StatusBadRequest, "auth must be 32 bytes")
+		jsonapi.Error(w, http.StatusBadRequest, "auth must be 32 bytes")
 		return
 	}
 	l, ok, err := h.Store.Login(r.Context(), req.ID)
@@ -230,10 +226,10 @@ func (h *handler) unlock(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok || subtle.ConstantTimeCompare(hash, verifier) != 1 {
 		h.Metrics.Limited("login_failed")
-		writeError(w, http.StatusUnauthorized, "wrong login or password")
+		jsonapi.Error(w, http.StatusUnauthorized, "wrong login or password")
 		return
 	}
-	writeJSON(w, http.StatusOK, unlockResponse{Secret: l.Secret})
+	jsonapi.Write(w, http.StatusOK, unlockResponse{Secret: l.Secret})
 }
 
 func (h *handler) get(w http.ResponseWriter, r *http.Request) {
@@ -247,12 +243,12 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		writeError(w, http.StatusNotFound, "the sync chain has no login")
+		jsonapi.Error(w, http.StatusNotFound, "the sync chain has no login")
 		return
 	}
 	rsp := getResponse{ID: l.ID, Scheme: l.Scheme, Updated: l.UpdatedAt.UTC()}
 	_ = json.Unmarshal(l.KDF, &rsp.KDF)
-	writeJSON(w, http.StatusOK, rsp)
+	jsonapi.Write(w, http.StatusOK, rsp)
 }
 
 func (h *handler) set(w http.ResponseWriter, r *http.Request) {
@@ -261,24 +257,24 @@ func (h *handler) set(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req setRequest
-	if !readJSON(w, r, &req) || !validID(w, req.ID) {
+	if !jsonapi.Read(w, r, &req) || !jsonapi.ValidID(w, req.ID) {
 		return
 	}
 	switch {
 	case req.Scheme != Scheme:
-		writeError(w, http.StatusBadRequest, "unknown scheme")
+		jsonapi.Error(w, http.StatusBadRequest, "unknown scheme")
 		return
 	case !req.KDF.valid():
-		writeError(w, http.StatusBadRequest, "kdf parameters out of range")
+		jsonapi.Error(w, http.StatusBadRequest, "kdf parameters out of range")
 		return
 	case len(req.Salt) < minSaltSize || len(req.Salt) > maxSaltSize:
-		writeError(w, http.StatusBadRequest, "salt must be 16 to 64 bytes")
+		jsonapi.Error(w, http.StatusBadRequest, "salt must be 16 to 64 bytes")
 		return
 	case len(req.Auth) != authSize:
-		writeError(w, http.StatusBadRequest, "auth must be 32 bytes")
+		jsonapi.Error(w, http.StatusBadRequest, "auth must be 32 bytes")
 		return
 	case len(req.Secret) < minSecret || len(req.Secret) > maxSecret:
-		writeError(w, http.StatusBadRequest, "secret must be 16 to 512 bytes")
+		jsonapi.Error(w, http.StatusBadRequest, "secret must be 16 to 512 bytes")
 		return
 	}
 
@@ -287,9 +283,9 @@ func (h *handler) set(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.As(err, &wait):
 			h.Metrics.Limited("new_chains")
-			tooMany(w, wait.Wait)
+			jsonapi.TooMany(w, wait.Wait)
 		case errors.Is(err, protocol.ErrFull):
-			writeError(w, http.StatusServiceUnavailable, err.Error())
+			jsonapi.Error(w, http.StatusServiceUnavailable, err.Error())
 		default:
 			h.fail(w, err)
 		}
@@ -309,9 +305,9 @@ func (h *handler) set(w http.ResponseWriter, r *http.Request) {
 	})
 	switch {
 	case errors.Is(err, store.ErrLoginTaken):
-		writeError(w, http.StatusConflict, "this login is taken by another sync chain")
+		jsonapi.Error(w, http.StatusConflict, "this login is taken by another sync chain")
 	case errors.Is(err, store.ErrNoChain):
-		writeError(w, http.StatusConflict, "the sync chain was removed")
+		jsonapi.Error(w, http.StatusConflict, "the sync chain was removed")
 	case err != nil:
 		h.fail(w, err)
 	default:
@@ -361,7 +357,7 @@ func (h *handler) allow(w http.ResponseWriter, l *ratelimit.Limiter, key string)
 	}
 	if ok, wait := l.Allow(key); !ok {
 		h.Metrics.Limited("login_rate")
-		tooMany(w, wait)
+		jsonapi.TooMany(w, wait)
 		return false
 	}
 	return true
@@ -369,43 +365,5 @@ func (h *handler) allow(w http.ResponseWriter, l *ratelimit.Limiter, key string)
 
 func (h *handler) fail(w http.ResponseWriter, err error) {
 	h.Log.Error("login request failed", "error", err)
-	writeError(w, http.StatusInternalServerError, "internal error")
-}
-
-func addrKey(r *http.Request) string {
-	return clientip.Key(clientip.FromContext(r.Context()))
-}
-
-func tooMany(w http.ResponseWriter, wait time.Duration) {
-	w.Header().Set("Retry-After", strconv.Itoa(int(max(wait, time.Second)/time.Second)))
-	writeError(w, http.StatusTooManyRequests, "too many attempts; try again later")
-}
-
-func validID(w http.ResponseWriter, id string) bool {
-	raw, err := hex.DecodeString(id)
-	if err != nil || len(raw) != idSize || hex.EncodeToString(raw) != id {
-		writeError(w, http.StatusBadRequest, "id must be 64 lowercase hex digits")
-		return false
-	}
-	return true
-}
-
-func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
-	if err := dec.Decode(v); err != nil {
-		writeError(w, http.StatusBadRequest, "malformed request")
-		return false
-	}
-	return true
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	jsonapi.Error(w, http.StatusInternalServerError, "internal error")
 }

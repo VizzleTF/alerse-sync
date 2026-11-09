@@ -11,6 +11,9 @@ it needs only PostgreSQL. A free public server is planned.
   devices can join without typing the code. The device encrypts the code with
   a key from the password; the server never sees the login name, the password
   or the code.
+- **Pairing.** A device that syncs shows a short one-time code; a new device
+  types it and gets the sync code over a SPAKE2 exchange the server only
+  relays.
 - **End-to-end encrypted** when the chain sets a passphrase: the server stores
   data it cannot read, and can be told to refuse anything else.
 - **Real-time.** A device that commits a change wakes the chain's other devices
@@ -87,6 +90,9 @@ or duration of `0` turns it off.
 | `LOGIN_ATTEMPTS_PER_IP_PER_HOUR` | `30` | Sign-in attempts per client address |
 | `LOGIN_LOOKUPS_PER_IP_PER_HOUR` | `120` | Sign-in parameter lookups per client address |
 | `LOGIN_CHANGES_PER_HOUR` | `30` | Sign-in reads and changes per sync chain |
+| `PAIR_CODES_PER_HOUR` | `20` | Pairing codes a sync chain may open |
+| `PAIR_JOINS_PER_IP_PER_HOUR` | `30` | Pairing joins per client address |
+| `PAIR_READS_PER_IP_PER_HOUR` | `1200` | Pairing slot reads per client address; a waiting device reads every 2 seconds |
 | `MAX_CHAINS` | `0` | Sync chains the server keeps |
 | `MAX_CONCURRENT_REQUESTS` | `64` | Protocol requests handled at once, which bounds memory |
 | `BODY_READ_TIMEOUT` | `20s` | Time a client has to send a request body |
@@ -130,14 +136,16 @@ METRICS_ADDR=127.0.0.1:9295
 | `POST /v2/command/` | Chromium sync protocol |
 | `GET /v2/events` | Change events of a sync chain |
 | `/v2/login` | Optional sign-in with a login name and password: set, change, remove, and join with it |
+| `/v2/pair` | Relay for pairing a new device with a short code |
 | `GET /health` | `200 ok` while the database answers, `503` otherwise |
 | `GET /livez` | `200` while the process runs |
 | `GET /readyz` | `200` while the server takes requests; `503` when the database is down or it is shutting down |
 | `GET /metrics` | Prometheus metrics, on `METRICS_ADDR` only |
 
-Clients authenticate the `/v2` endpoints with a signed token, except the two
-sign-in requests of a device that joins. The token format, the events, the
-sign-in, the limits and what the server keeps are in
+Clients authenticate the `/v2` endpoints with a signed token, except the
+requests of a device that joins with a sign-in or a pairing code. The token
+format, the events, the sign-in, pairing, the limits and what the server keeps
+are in
 [How the server works](docs/protocol.md).
 
 ## Operate

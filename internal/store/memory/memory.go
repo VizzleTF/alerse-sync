@@ -32,6 +32,7 @@ type Store struct {
 	mu      sync.Mutex
 	chains  map[string]*chain
 	secrets map[string][]byte
+	slots   map[string]*store.PairSlot
 }
 
 // New returns an empty store.

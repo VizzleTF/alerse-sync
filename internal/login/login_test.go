@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/VizzleTF/arcomium-sync/internal/auth"
+	"github.com/VizzleTF/arcomium-sync/internal/clientip"
 	"github.com/VizzleTF/arcomium-sync/internal/protocol"
 	"github.com/VizzleTF/arcomium-sync/internal/ratelimit"
 	"github.com/VizzleTF/arcomium-sync/internal/store/memory"
@@ -37,7 +38,7 @@ func newEnv(t *testing.T, c Config) *env {
 	c.EnsureChain = service.EnsureChain
 	c.Hash = cheap
 	c.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
-	return &env{t: t, h: Handler(c), store: st}
+	return &env{t: t, h: (*clientip.Resolver)(nil).Middleware(Handler(c)), store: st}
 }
 
 func (e *env) do(method, path, token string, body any) *httptest.ResponseRecorder {
@@ -219,9 +220,22 @@ func TestAttemptsLimited(t *testing.T) {
 	if rec.Code != 429 || rec.Header().Get("Retry-After") == "" {
 		t.Fatalf("attempt over the limit: HTTP %d, Retry-After %q", rec.Code, rec.Header().Get("Retry-After"))
 	}
-	// Another login name is not affected.
+	// Another login name is not affected...
 	if rec := e.do("POST", "/v2/login/unlock", "", unlockRequest{ID: loginID("frank"), Auth: make([]byte, 32)}); rec.Code != 401 {
 		t.Fatalf("other login: HTTP %d", rec.Code)
+	}
+}
+
+func TestAttemptsLimitedPerAddress(t *testing.T) {
+	e := newEnv(t, Config{AddrAttempts: ratelimit.NewPer(2, time.Hour)})
+	for i, name := range []string{"a", "b"} {
+		if rec := e.do("POST", "/v2/login/unlock", "", unlockRequest{ID: loginID(name), Auth: make([]byte, 32)}); rec.Code != 401 {
+			t.Fatalf("attempt %d: HTTP %d", i, rec.Code)
+		}
+	}
+	// A third login name from the same address waits.
+	if rec := e.do("POST", "/v2/login/unlock", "", unlockRequest{ID: loginID("c"), Auth: make([]byte, 32)}); rec.Code != 429 {
+		t.Fatalf("over the address limit: HTTP %d", rec.Code)
 	}
 }
 

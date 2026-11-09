@@ -32,6 +32,9 @@ type config struct {
 	loginAttemptsPerAddr   int
 	loginLookupsPerAddr    int
 	loginChangesPerHour    int
+	pairOpensPerHour       int
+	pairJoinsPerAddr       int
+	pairReadsPerAddr       int
 	maxEventStreams        int
 	maxStreamsPerAddr      int
 	maxStreamsTotal        int
@@ -136,6 +139,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	number("LOGIN_ATTEMPTS_PER_IP_PER_HOUR", &c.loginAttemptsPerAddr, 30)
 	number("LOGIN_LOOKUPS_PER_IP_PER_HOUR", &c.loginLookupsPerAddr, 120)
 	number("LOGIN_CHANGES_PER_HOUR", &c.loginChangesPerHour, 30)
+	number("PAIR_CODES_PER_HOUR", &c.pairOpensPerHour, 20)
+	number("PAIR_JOINS_PER_IP_PER_HOUR", &c.pairJoinsPerAddr, 30)
+	number("PAIR_READS_PER_IP_PER_HOUR", &c.pairReadsPerAddr, 1200)
 	count("MAX_ENTITIES", &c.limits.MaxEntities, protocol.DefaultLimits.MaxEntities)
 	size("MAX_BYTES_PER_CHAIN", &c.limits.MaxBytes, protocol.DefaultLimits.MaxBytes)
 	count("MAX_HISTORY_ENTITIES", &c.limits.MaxHistoryEntities, protocol.DefaultLimits.MaxHistoryEntities)

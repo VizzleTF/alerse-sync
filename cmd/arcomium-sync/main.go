@@ -26,6 +26,7 @@ import (
 	"github.com/VizzleTF/arcomium-sync/internal/events"
 	"github.com/VizzleTF/arcomium-sync/internal/login"
 	"github.com/VizzleTF/arcomium-sync/internal/metrics"
+	"github.com/VizzleTF/arcomium-sync/internal/pairing"
 	"github.com/VizzleTF/arcomium-sync/internal/protocol"
 	"github.com/VizzleTF/arcomium-sync/internal/ratelimit"
 	"github.com/VizzleTF/arcomium-sync/internal/retention"
@@ -141,7 +142,18 @@ func run(ctx context.Context, log *slog.Logger) error {
 		ratelimit.NewPer(c.loginAttemptsPerAddr, time.Hour),
 		ratelimit.NewPer(c.loginLookupsPerAddr, time.Hour),
 		ratelimit.NewPer(c.loginChangesPerHour, time.Hour),
+		ratelimit.NewPer(c.pairOpensPerHour, time.Hour),
+		ratelimit.NewPer(c.pairJoinsPerAddr, time.Hour),
+		ratelimit.NewPer(c.pairReadsPerAddr, time.Hour),
 	}
+	pairHandler := pairing.Handler(pairing.Config{
+		Store:   st,
+		Opens:   loginLimiters[4],
+		Joins:   loginLimiters[5],
+		Reads:   loginLimiters[6],
+		Log:     log,
+		Metrics: m,
+	})
 	loginHandler := login.Handler(login.Config{
 		Store:        st,
 		EnsureChain:  service.EnsureChain,
@@ -158,6 +170,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		Service:     service,
 		Events:      hub,
 		Login:       loginHandler,
+		Pair:        pairHandler,
 		Limiter:     chainLimiter,
 		AddrLimiter: addrLimiter,
 		ClientIP:    clientip.New(c.trustedProxies, c.clientIPHeader),

@@ -189,11 +189,67 @@ their own minimum. The sync code itself, 256 random bits, cannot be guessed.
 Login names are not verified: nobody checks that an email address belongs to
 whoever uses it, and the first chain to set a login name has it. On a public
 server, email addresses should be verified before they can be claimed; that
-comes with mail, which does not exist yet. Sending a chain's sync code by mail
-would expose it to the mail path and is undecided.
+comes with mail, which does not exist yet. Mailing a chain's sync code to the
+user was rejected: mail is a weak channel, and sending it from the server would
+hand the code to the server. Clients offer a printable recovery sheet instead.
 
 Later schemes, such as OPAQUE (RFC 9807), which would also hide `auth` from
-the server, can be added next to `pw-v1`: every record names its scheme.
+the server, can be added next to `pw-v1`: every record names its scheme. A
+second factor (TOTP) is planned for a public server, not built.
+
+## Pairing a new device
+
+A device of a chain can hand the chain's secret to a new device through the
+server, with a short one-time code that the user reads on one screen and types
+on the other. The server only relays; `internal/pairing` implements it.
+
+**What the devices do** (scheme `pair-v1`):
+
+```text
+code    = 12 characters of Crockford base32 (0-9, A-Z without I, L, O, U),
+          shown XXXX-XXXX-XXXX; O reads as 0, I and L as 1
+slot    = hex(SHA-256("arcomium-pair-slot-v1" | 0x00 | first 4 characters))
+SPAKE2  = BoringSSL's SPAKE2 (Curve25519), the existing device as Alice with
+          name "arcomium-pair-existing", the new one as Bob with name
+          "arcomium-pair-new", password
+          "arcomium-pair-v1" | 0x00 | slot | 0x00 | last 8 characters (40 bits)
+keys    = HKDF-SHA256(SPAKE2 key, info "arcomium-pair-confirm", "arcomium-pair-box",
+          "arcomium-pair-verify"), 32 bytes each
+confirm = HMAC-SHA256(confirm key, "arcomium-pair-new-device" | 0x00 | device name)
+number  = first 4 bytes of the verify key, big-endian, mod 10000: shown on both
+box     = 0x01 | nonce (12) | AES-256-GCM(box key, chain secret, aad "arcomium-pair-v1" | slot)
+```
+
+1. The existing device (A) opens a slot with its SPAKE2 message.
+2. The new device (B) reads the slot, finishes SPAKE2, and joins with its own
+   message, its name and `confirm`.
+3. A finishes SPAKE2 and checks `confirm`. A wrong code fails here; A closes the
+   slot. Otherwise both show `number`, and A asks the user to allow B by name.
+4. On Allow, A approves with `box`; B reads it and opens it.
+
+**Requests.** Bodies are JSON; byte strings are standard base64.
+
+| Request | Auth | Body | Answer |
+|---|---|---|---|
+| `POST /v2/pair` | token | `{"slot","msg"}` | 204; 409 if the slot is in use |
+| `GET /v2/pair/{slot}` | none | | `{"msg","joined","bmsg","name","confirm","box","expires"}`, or 404 |
+| `POST /v2/pair/{slot}/join` | none | `{"msg","name","confirm"}` | 204; 409 if someone joined already |
+| `POST /v2/pair/{slot}/approve` | token, the slot's chain | `{"box"}` | 204; 409 before a join or after an approval |
+| `DELETE /v2/pair/{slot}` | token, the slot's chain | | 204 |
+
+A slot lives 5 minutes (`expires` counts the seconds left), takes one join and
+one approval, and goes with its chain. Opening is limited per chain
+(`PAIR_CODES_PER_HOUR`, 20), joins and reads per client address
+(`PAIR_JOINS_PER_IP_PER_HOUR`, 30; `PAIR_READS_PER_IP_PER_HOUR`, 1200; devices
+poll every 2 seconds).
+
+**What the server learns:** the slot id, the two SPAKE2 messages, the new
+device's name, `confirm` and the encrypted secret. SPAKE2 messages allow no
+offline guessing of the password, so the server, or anyone who reads the slot,
+can only try one code online by joining first; that fails `confirm`, A closes
+the slot, and the user makes a new code. A relay that answered both sides with
+its own messages would need the code too, and the number on both screens shows
+it.
 
 ## Events
 
@@ -225,6 +281,7 @@ next poll, which the server sets to once an hour.
 | `entities` | Each entity as the client committed it, with its server ID, version and the time it was written |
 | `logins` | A chain's optional sign-in: a hash of the login name, the client's salt and KDF parameters, an Argon2id hash of the authentication key, the chain secret encrypted on the device |
 | `server_secrets` | Random values shared by all instances, such as the key for made-up salts |
+| `pair_slots` | Pairings in progress, for 5 minutes: the slot id, the chain, the SPAKE2 messages, the new device's name and confirmation, the encrypted secret |
 
 **Encryption.** With a sync passphrase, Chromium encrypts every data type with a
 key derived from the passphrase. The server then stores only ciphertext, plus
