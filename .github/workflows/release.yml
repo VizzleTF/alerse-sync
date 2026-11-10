@@ -1,5 +1,5 @@
 # A tag `v*` publishes binaries for Linux, Windows and macOS (amd64, arm64) as
-# a GitHub Release, and a multi-arch image as ghcr.io/vizzletf/arcomium-sync
+# a GitHub Release, and a multi-arch image as ghcr.io/vizzletf/alerse-sync
 # with an SBOM and build provenance. Actions are pinned by commit.
 name: release
 on:

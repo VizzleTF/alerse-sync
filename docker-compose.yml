@@ -25,9 +25,16 @@ services:
         condition: service_healthy
 
   sync:
-    image: ghcr.io/vizzletf/arcomium-sync:latest
+    # A release, so an update is a change to this line; the image is named
+    # after the repository, alerse-sync, from 0.1.3 on.
+    image: ghcr.io/vizzletf/alerse-sync:0.1.3
     build: .
     restart: unless-stopped
+    # The server writes nothing to its file system and needs no privileges.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     # Only Caddy reaches the server. To reach it directly from this host:
     # ports:
     #   - "127.0.0.1:8295:8295"
