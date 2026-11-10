@@ -145,6 +145,7 @@ func TestProbes(t *testing.T) {
 	c := baseConfig(memory.New())
 	c.Health = func(context.Context) error { return dbErr }
 	c.Ready = func() bool { return ready }
+	c.HealthInterval = -1
 	h := Handler(c)
 	get := func(path string) int {
 		rec := httptest.NewRecorder()
@@ -225,5 +226,19 @@ func TestAccessLogAndMetrics(t *testing.T) {
 	want := `arcomium_sync_requests_total{message="get_updates",result="SUCCESS",route="command"} 1`
 	if !strings.Contains(rec.Body.String(), want) {
 		t.Errorf("metrics lack %s", want)
+	}
+}
+
+func TestProbesReuseHealthCheck(t *testing.T) {
+	checks := 0
+	c := baseConfig(memory.New())
+	c.Health = func(context.Context) error { checks++; return nil }
+	c.HealthInterval = time.Hour
+	h := Handler(c)
+	for range 5 {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
+	}
+	if checks != 1 {
+		t.Errorf("5 probes checked the database %d times, want 1", checks)
 	}
 }

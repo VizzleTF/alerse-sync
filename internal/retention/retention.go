@@ -49,13 +49,15 @@ func (j Job) Once(ctx context.Context) {
 	if policy.Batch <= 0 {
 		policy.Batch = 1000
 	}
-	ctx, cancel := context.WithTimeout(ctx, max(j.Interval, time.Minute))
+	run, cancel := context.WithTimeout(ctx, max(j.Interval, time.Minute))
 	defer cancel()
 	start := time.Now()
-	done, err := j.Store.Collect(ctx, policy)
+	done, err := j.Store.Collect(run, policy)
 	if j.Done != nil {
 		j.Done(done)
 	}
+	// Quiet only when the server shuts down; a run that takes too long is
+	// a failure to know about.
 	if err != nil && ctx.Err() == nil {
 		j.Log.Error("retention job failed", "error", err)
 	}

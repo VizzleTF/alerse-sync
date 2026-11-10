@@ -23,6 +23,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -50,6 +51,8 @@ const (
 	queueTimeout = 10 * time.Second
 	// readersPerSlot is how many bodies may be read per processing slot.
 	readersPerSlot = 4
+	// DefaultHealthInterval is how long the probes reuse a database check.
+	DefaultHealthInterval = time.Second
 )
 
 // Config is what the handler needs.
@@ -71,6 +74,9 @@ type Config struct {
 	ChainExists func(ctx context.Context, chainID string) (bool, error)
 	// Health checks the database.
 	Health func(context.Context) error
+	// HealthInterval is how long the probes reuse a check of the database;
+	// DefaultHealthInterval if 0, every probe checks if negative.
+	HealthInterval time.Duration
 	// Ready, if set, reports false while the server shuts down.
 	Ready func() bool
 	Log   *slog.Logger
@@ -90,6 +96,9 @@ func Handler(c Config) http.Handler {
 	h := &handler{Config: c}
 	if h.BodyTimeout <= 0 {
 		h.BodyTimeout = DefaultBodyTimeout
+	}
+	if h.HealthInterval == 0 {
+		h.HealthInterval = DefaultHealthInterval
 	}
 	if c.MaxConcurrent > 0 {
 		h.slots = make(chan struct{}, c.MaxConcurrent)
@@ -121,6 +130,10 @@ type handler struct {
 	Config
 	slots   chan struct{} // nil: no limit
 	readers chan struct{} // nil: no limit
+
+	healthMu  sync.Mutex
+	healthAt  time.Time
+	healthErr error
 }
 
 func (h *handler) command(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +263,11 @@ func (h *handler) respond(w http.ResponseWriter, r *http.Request, rsp *pb.Client
 func (h *handler) limitAddr(protocolResponse bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := clientip.Key(clientip.FromContext(r.Context()))
-		if ok, wait := h.AddrLimiter.Allow(key); key != "" && !ok {
+		if key == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if ok, wait := h.AddrLimiter.Allow(key); !ok {
 			h.Metrics.Limited("addr_rate")
 			if protocolResponse {
 				infoOf(r.Context()).result = pb.SyncEnums_THROTTLED.String()
@@ -310,10 +327,22 @@ func (h *handler) named(next http.Handler) http.Handler {
 	})
 }
 
+// checkHealth asks the database at most once per HealthInterval: the probes
+// take no token, and a flood of them must not use up the connection pool.
+func (h *handler) checkHealth(ctx context.Context) error {
+	h.healthMu.Lock()
+	defer h.healthMu.Unlock()
+	if h.healthAt.IsZero() || time.Since(h.healthAt) >= h.HealthInterval {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		h.healthErr = h.Health(ctx)
+		h.healthAt = time.Now()
+	}
+	return h.healthErr
+}
+
 func (h *handler) health(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	if err := h.Health(ctx); err != nil {
+	if err := h.checkHealth(r.Context()); err != nil {
 		h.Log.Error("health check failed", "error", err)
 		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
 		return

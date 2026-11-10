@@ -137,30 +137,32 @@ func run(ctx context.Context, log *slog.Logger) error {
 
 	chainLimiter := ratelimit.New(c.ratePerMinute)
 	addrLimiter := ratelimit.New(c.ratePerAddrPerMinute)
-	loginLimiters := []*ratelimit.Limiter{
-		ratelimit.NewPer(c.loginAttemptsPerHour, time.Hour),
-		ratelimit.NewPer(c.loginAttemptsPerAddr, time.Hour),
-		ratelimit.NewPer(c.loginLookupsPerAddr, time.Hour),
-		ratelimit.NewPer(c.loginChangesPerHour, time.Hour),
-		ratelimit.NewPer(c.pairOpensPerHour, time.Hour),
-		ratelimit.NewPer(c.pairJoinsPerAddr, time.Hour),
-		ratelimit.NewPer(c.pairReadsPerAddr, time.Hour),
+	loginAttempts := ratelimit.NewPer(c.loginAttemptsPerHour, time.Hour)
+	loginAddrAttempts := ratelimit.NewPer(c.loginAttemptsPerAddr, time.Hour)
+	loginLookups := ratelimit.NewPer(c.loginLookupsPerAddr, time.Hour)
+	loginChanges := ratelimit.NewPer(c.loginChangesPerHour, time.Hour)
+	pairOpens := ratelimit.NewPer(c.pairOpensPerHour, time.Hour)
+	pairJoins := ratelimit.NewPer(c.pairJoinsPerAddr, time.Hour)
+	pairReads := ratelimit.NewPer(c.pairReadsPerAddr, time.Hour)
+	limiters := []*ratelimit.Limiter{
+		chainLimiter, addrLimiter, newChains, loginAttempts, loginAddrAttempts, loginLookups,
+		loginChanges, pairOpens, pairJoins, pairReads,
 	}
 	pairHandler := pairing.Handler(pairing.Config{
 		Store:   st,
-		Opens:   loginLimiters[4],
-		Joins:   loginLimiters[5],
-		Reads:   loginLimiters[6],
+		Opens:   pairOpens,
+		Joins:   pairJoins,
+		Reads:   pairReads,
 		Log:     log,
 		Metrics: m,
 	})
 	loginHandler := login.Handler(login.Config{
 		Store:        st,
 		EnsureChain:  service.EnsureChain,
-		Attempts:     loginLimiters[0],
-		AddrAttempts: loginLimiters[1],
-		Lookups:      loginLimiters[2],
-		Changes:      loginLimiters[3],
+		Attempts:     loginAttempts,
+		AddrAttempts: loginAddrAttempts,
+		Lookups:      loginLookups,
+		Changes:      loginChanges,
 		Log:          log,
 		Metrics:      m,
 	})
@@ -218,8 +220,8 @@ func run(ctx context.Context, log *slog.Logger) error {
 		m.Pool(pool)
 		m.Gauge("event_streams", "Open event streams on this instance.", func() float64 { return float64(hub.Streams()) })
 		m.Gauge("rate_limited_keys", "Chains and addresses the rate limiters track.", func() float64 {
-			n := chainLimiter.Keys() + addrLimiter.Keys() + newChains.Keys()
-			for _, l := range loginLimiters {
+			n := 0
+			for _, l := range limiters {
 				n += l.Keys()
 			}
 			return float64(n)

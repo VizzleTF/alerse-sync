@@ -26,6 +26,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/argon2"
@@ -107,6 +108,9 @@ type Config struct {
 type handler struct {
 	Config
 	slots chan struct{}
+
+	fakeMu  sync.Mutex
+	fakeKey []byte // the server secret behind fake, once read
 }
 
 // Handler returns the login routes, under /v2/login.
@@ -247,7 +251,10 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rsp := getResponse{ID: l.ID, Scheme: l.Scheme, Updated: l.UpdatedAt.UTC()}
-	_ = json.Unmarshal(l.KDF, &rsp.KDF)
+	if err := json.Unmarshal(l.KDF, &rsp.KDF); err != nil {
+		h.fail(w, err)
+		return
+	}
 	jsonapi.Write(w, http.StatusOK, rsp)
 }
 
@@ -342,13 +349,29 @@ func (h *handler) hash(ctx context.Context, key, salt []byte) ([]byte, error) {
 // fake makes up a value of kind for a login ID without a login, the same on
 // every request and instance.
 func (h *handler) fake(ctx context.Context, kind, id string) ([]byte, error) {
-	key, err := h.Store.ServerSecret(ctx, fakeSecret)
+	key, err := h.fakeSecretKey(ctx)
 	if err != nil {
 		return nil, err
 	}
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(kind + "\x00" + id))
 	return mac.Sum(nil), nil
+}
+
+// fakeSecretKey reads the server secret once: it never changes, and reading
+// it on every request would make a login name without a login answer slower
+// than one with a login.
+func (h *handler) fakeSecretKey(ctx context.Context) ([]byte, error) {
+	h.fakeMu.Lock()
+	defer h.fakeMu.Unlock()
+	if h.fakeKey == nil {
+		key, err := h.Store.ServerSecret(ctx, fakeSecret)
+		if err != nil {
+			return nil, err
+		}
+		h.fakeKey = key
+	}
+	return h.fakeKey, nil
 }
 
 func (h *handler) allow(w http.ResponseWriter, l *ratelimit.Limiter, key string) bool {

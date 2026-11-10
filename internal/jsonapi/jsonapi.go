@@ -15,9 +15,20 @@ import (
 // MaxBodyBytes bounds a JSON request body.
 const MaxBodyBytes = 4 << 10
 
+// bodyTimeout bounds the time to receive a JSON request body: the server has
+// no read timeout of its own, which would cut event streams.
+const bodyTimeout = 10 * time.Second
+
 // Read decodes a JSON body into v, or answers 400.
 func Read(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxBodyBytes)).Decode(v); err != nil {
+	rc := http.NewResponseController(w)
+	// Not every ResponseWriter supports deadlines.
+	_ = rc.SetReadDeadline(time.Now().Add(bodyTimeout))
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxBodyBytes)).Decode(v)
+	// The server keeps reading the connection to notice a client that goes
+	// away; a deadline that passes then would end the request's context.
+	_ = rc.SetReadDeadline(time.Time{})
+	if err != nil {
 		Error(w, http.StatusBadRequest, "malformed request")
 		return false
 	}
