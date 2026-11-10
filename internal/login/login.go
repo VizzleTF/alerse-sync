@@ -81,7 +81,7 @@ const (
 	maxSecret   = 512
 	// fakeSecret names the server secret that makes up salts and
 	// verifiers for login names without a login.
-	fakeSecret = "login-fake-salt"
+	fakeSecret = "login-fake-salt" //nolint:gosec // the name of the secret, not its value
 	// hashSlots bounds the Argon2id hashes computed at once, which bounds
 	// their memory.
 	hashSlots = 4
