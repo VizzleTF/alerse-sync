@@ -73,10 +73,11 @@ or duration of `0` turns it off.
 | `DATABASE_URL` | required | Postgres URL. `pool_max_conns=N` in it sets the pool size; otherwise it is `MAX_CONCURRENT_REQUESTS` up to 32, plus 4 |
 | `PORT` | `8295` | HTTP port |
 | `METRICS_ADDR` | off | Address for Prometheus metrics at `/metrics`, such as `127.0.0.1:9295`. Keep it off the internet |
-| `ACCESS_LOG` | `true` | Log every request: method, path, status, time, sizes, a shortened chain ID. Never bodies, query strings, tokens or IP addresses |
+| `ACCESS_LOG` | `true` | Log every request: method, path, status, time, sizes, a shortened chain ID. Never bodies, query strings, tokens or IP addresses; an address is logged only when it is shut out |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`; logs are JSON on stderr |
 | `SHUTDOWN_DELAY` | `0` | How long to fail `/readyz` before stopping on SIGTERM, so a load balancer stops sending requests first |
-| `SESSIONS_NUDGE_DELAY` | `3s` | How long a device waits before it sends a change to its open tabs; `0` leaves Chromium's 15 seconds |
+| `NUDGE_DELAY` | `60s` | How long a device waits after a change before it sends all its changes since; `0` leaves Chromium's delays. [Commit delays](docs/protocol.md#the-sync-protocol) lists the types it applies to |
+| `SESSIONS_NUDGE_DELAY` | `15s` | The same for open tabs |
 
 **What a sync chain may store**
 
@@ -101,6 +102,16 @@ or duration of `0` turns it off.
 | `UNLOCK_ATTEMPTS_PER_IP_PER_HOUR` | `30` | Password checks of accounts per client address |
 | `UNLOCK_LOOKUPS_PER_IP_PER_HOUR` | `120` | Account sign-in parameter lookups per client address |
 | `ACCOUNT_CHANGES_PER_HOUR` | `120` | Account and device requests per account |
+| `NEW_DEVICES_PER_ACCOUNT_PER_DAY` | `5` | Keys new to an account per day |
+| `DEVICE_REQUESTS_PER_MINUTE` | `60` | Requests per device key, whatever they are |
+| `DEVICE_REQUEST_BURST` | `300` | Of those, how many a device may send at once, as on its first sync |
+| `COMMITS_PER_CHAIN_PER_HOUR` | `360` | Commits per sync chain, enforced whatever the client was told to wait |
+| `COMMIT_BURST` | `120` | Of those, how many at once, as for a first upload |
+| `UNKNOWN_ACCOUNT_LOOKUPS_PER_SECOND` | `20` | Database lookups, for the whole instance, of devices of accounts it has not seen: made-up tokens, and real devices after a start |
+| `BAN_AFTER_FAILURES` | `30` | Refused requests from one address that shut it out; `0` shuts out nobody |
+| `BAN_WINDOW` | `10m` | The time those are counted in |
+| `BAN_DURATION` | `15m` | How long the address stays shut out |
+| `MAX_REQUEST_BYTES` | `32MiB` | A protocol request body, before and after decompression. A larger declared body is refused unread |
 | `MAX_ACCOUNTS` | `0` | Accounts the server keeps |
 | `MAX_DEVICES_PER_ACCOUNT` | `50` | Signed-in devices per account |
 | `MAX_CHAINS_PER_ACCOUNT` | `50` | Sync chains per account, one per Space |

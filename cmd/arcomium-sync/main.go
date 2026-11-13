@@ -26,6 +26,7 @@ import (
 	"github.com/VizzleTF/arcomium-sync/internal/clientip"
 	"github.com/VizzleTF/arcomium-sync/internal/credential"
 	"github.com/VizzleTF/arcomium-sync/internal/events"
+	"github.com/VizzleTF/arcomium-sync/internal/guard"
 	"github.com/VizzleTF/arcomium-sync/internal/metrics"
 	"github.com/VizzleTF/arcomium-sync/internal/protocol"
 	"github.com/VizzleTF/arcomium-sync/internal/ratelimit"
@@ -142,36 +143,47 @@ func run(ctx context.Context, log *slog.Logger) error {
 	unlockAddrAttempts := ratelimit.NewPer(c.unlockAttemptsPerAddr, time.Hour)
 	unlockLookups := ratelimit.NewPer(c.unlockLookupsPerAddr, time.Hour)
 	accountChanges := ratelimit.NewPer(c.accountChangesPerHour, time.Hour)
+	commits := ratelimit.NewBurst(c.commitsPerChainPerHour, time.Hour, c.commitBurst)
+	deviceRequests := ratelimit.NewBurst(c.deviceRequestsPerMin, time.Minute, c.deviceRequestBurst)
+	newDevices := ratelimit.NewPer(c.newDevicesPerDay, 24*time.Hour)
+	unknownLookups := ratelimit.NewBurst(c.unknownLookupsPerSec, time.Second, 5*c.unknownLookupsPerSec)
 	limiters := []*ratelimit.Limiter{
 		chainLimiter, addrLimiter, newChains,
 		newAccounts, unlockAttempts, unlockAddrAttempts, unlockLookups, accountChanges,
+		commits, deviceRequests, newDevices, unknownLookups,
 	}
 	// One hasher, so that the Argon2id memory of unlocks adds up to one bound.
 	hasher := credential.NewHasher(credential.DefaultHash)
 	accounts := account.New(account.Config{
-		Store:        st,
-		Hasher:       hasher,
-		Creates:      newAccounts,
-		Lookups:      unlockLookups,
-		Attempts:     unlockAttempts,
-		AddrAttempts: unlockAddrAttempts,
-		Changes:      accountChanges,
-		MaxAccounts:  c.maxAccounts,
-		MaxDevices:   c.maxDevicesPerAccount,
-		MaxChains:    c.maxChainsPerAccount,
-		Cleared:      service.Cleared,
-		Log:          log,
-		Metrics:      m,
+		Store:          st,
+		Hasher:         hasher,
+		Creates:        newAccounts,
+		Lookups:        unlockLookups,
+		Attempts:       unlockAttempts,
+		AddrAttempts:   unlockAddrAttempts,
+		Changes:        accountChanges,
+		DeviceRequests: deviceRequests,
+		NewDevices:     newDevices,
+		UnknownLookups: unknownLookups,
+		MaxAccounts:    c.maxAccounts,
+		MaxDevices:     c.maxDevicesPerAccount,
+		MaxChains:      c.maxChainsPerAccount,
+		Cleared:        service.Cleared,
+		Log:            log,
+		Metrics:        m,
 	})
 	var ready atomic.Bool
 	ready.Store(true)
 	handler := server.Handler(server.Config{
-		Service:     service,
-		Events:      hub,
-		Accounts:    accounts,
-		Limiter:     chainLimiter,
-		AddrLimiter: addrLimiter,
-		ClientIP:    clientip.New(c.trustedProxies, c.clientIPHeader),
+		Service:         service,
+		Events:          hub,
+		Accounts:        accounts,
+		Limiter:         chainLimiter,
+		AddrLimiter:     addrLimiter,
+		Commits:         commits,
+		Guard:           guard.New(c.banAfterFailures, c.banWindow, c.banDuration),
+		MaxRequestBytes: c.maxRequestBytes,
+		ClientIP:        clientip.New(c.trustedProxies, c.clientIPHeader),
 		ChainExists: func(ctx context.Context, chainID string) (bool, error) {
 			_, ok, err := st.Chain(ctx, chainID)
 			return ok, err

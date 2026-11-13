@@ -3,7 +3,6 @@ package protocol
 import (
 	"bytes"
 	"context"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -574,22 +573,28 @@ func TestMaxChains(t *testing.T) {
 	}
 }
 
-func TestSessionsNudgeDelay(t *testing.T) {
+func TestNudgeDelays(t *testing.T) {
+	const autofillType, nigoriType = 31729, 47745
 	for _, test := range []struct {
-		delay time.Duration
-		want  []int32 // datatype, delay in ms
+		name            string
+		delay, sessions time.Duration
+		want            map[int32]int32 // data type: delay in ms; -1 for none
 	}{
-		{3 * time.Second, []int32{sessionType, 3000}},
-		{0, nil},
+		{"both", time.Minute, 15 * time.Second, map[int32]int32{
+			sessionType: 15000, bookmarkType: 60000, preferenceType: 60000, autofillType: -1, nigoriType: -1}},
+		{"tabs only", 0, 3 * time.Second, map[int32]int32{sessionType: 3000, bookmarkType: -1}},
+		{"none", 0, 0, map[int32]int32{sessionType: -1, bookmarkType: -1}},
 	} {
-		s, _ := newService(t, func(l *Limits) { l.SessionsNudgeDelay = test.delay })
+		s, _ := newService(t, func(l *Limits) { l.NudgeDelay, l.SessionsNudgeDelay = test.delay, test.sessions })
 		rsp := newDevice(t, s, "a").fetch(bookmarkType)
-		var got []int32
+		got := map[int32]int32{}
 		for _, d := range rsp.GetClientCommand().GetCustomNudgeDelays() {
-			got = append(got, d.GetDatatypeId(), d.GetDelayMs())
+			got[d.GetDatatypeId()] = d.GetDelayMs()
 		}
-		if !slices.Equal(got, test.want) {
-			t.Errorf("delay %v: custom nudge delays %v, want %v", test.delay, got, test.want)
+		for dataType, want := range test.want {
+			if d, ok := got[dataType]; (want < 0 && ok) || (want >= 0 && d != want) {
+				t.Errorf("%s: delay of %d is %d (set %v), want %d", test.name, dataType, d, ok, want)
+			}
 		}
 	}
 }

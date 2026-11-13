@@ -31,6 +31,7 @@ import (
 	"github.com/VizzleTF/arcomium-sync/internal/account"
 	"github.com/VizzleTF/arcomium-sync/internal/auth"
 	"github.com/VizzleTF/arcomium-sync/internal/clientip"
+	"github.com/VizzleTF/arcomium-sync/internal/guard"
 	"github.com/VizzleTF/arcomium-sync/internal/metrics"
 	"github.com/VizzleTF/arcomium-sync/internal/protocol"
 	"github.com/VizzleTF/arcomium-sync/internal/ratelimit"
@@ -38,9 +39,9 @@ import (
 )
 
 const (
-	// maxRequestBytes bounds a request body, before and after
+	// DefaultMaxRequestBytes bounds a request body, before and after
 	// decompression.
-	maxRequestBytes = 32 << 20
+	DefaultMaxRequestBytes = 32 << 20
 	// commandTimeout bounds the work on one protocol request.
 	commandTimeout = time.Minute
 	// DefaultBodyTimeout is how long a client may take to send a request
@@ -66,6 +67,15 @@ type Config struct {
 	// address; nil for no limit.
 	Limiter     *ratelimit.Limiter
 	AddrLimiter *ratelimit.Limiter
+	// Commits limits commits per sync chain, whatever the client was told
+	// about waiting between them; nil for no limit.
+	Commits *ratelimit.Limiter
+	// MaxRequestBytes bounds a protocol request body; 0 means
+	// DefaultMaxRequestBytes.
+	MaxRequestBytes int64
+	// Guard shuts out client addresses that keep sending refused requests;
+	// nil shuts out nobody.
+	Guard *guard.Guard
 	// ClientIP finds client addresses behind proxies; nil uses the
 	// connection's address.
 	ClientIP *clientip.Resolver
@@ -96,6 +106,9 @@ func Handler(c Config) http.Handler {
 	h := &handler{Config: c}
 	if h.BodyTimeout <= 0 {
 		h.BodyTimeout = DefaultBodyTimeout
+	}
+	if h.MaxRequestBytes <= 0 {
+		h.MaxRequestBytes = DefaultMaxRequestBytes
 	}
 	if h.HealthInterval == 0 {
 		h.HealthInterval = DefaultHealthInterval
@@ -144,6 +157,12 @@ func (h *handler) command(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A body declared too large is refused unread.
+	if r.ContentLength > h.MaxRequestBytes {
+		http.Error(w, fmt.Sprintf("request is larger than %d bytes", h.MaxRequestBytes), http.StatusRequestEntityTooLarge)
+		return
+	}
+
 	// The body is read before taking a slot, with a deadline of its own, so
 	// clients that send slowly cannot hold the slots.
 	rc := http.NewResponseController(w)
@@ -153,7 +172,7 @@ func (h *handler) command(w http.ResponseWriter, r *http.Request) {
 	if !h.acquire(w, r, h.readers) {
 		return
 	}
-	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.MaxRequestBytes))
 	release(h.readers)
 	if err != nil {
 		h.bodyError(w, err)
@@ -171,7 +190,7 @@ func (h *handler) command(w http.ResponseWriter, r *http.Request) {
 	h.Metrics.Started()
 	defer h.Metrics.Finished()
 
-	body, err := decode(raw, r.Header.Get("Content-Encoding"))
+	body, err := decode(raw, r.Header.Get("Content-Encoding"), h.MaxRequestBytes)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -182,6 +201,14 @@ func (h *handler) command(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info.message = messageName(msg)
+	if msg.GetMessageContents() == pb.ClientToServerMessage_COMMIT {
+		if ok, wait := h.Commits.Allow(chainID); !ok {
+			h.Metrics.Limited("chain_commits")
+			info.result = pb.SyncEnums_THROTTLED.String()
+			h.respond(w, r, protocol.Throttled(wait))
+			return
+		}
+	}
 
 	// The work does not stop when the client goes away or the server shuts
 	// down: a commit half done helps nobody.
@@ -233,7 +260,7 @@ func (h *handler) bodyError(w http.ResponseWriter, err error) {
 	var tooLarge *http.MaxBytesError
 	switch {
 	case errors.As(err, &tooLarge):
-		http.Error(w, fmt.Sprintf("request is larger than %d bytes", maxRequestBytes), http.StatusRequestEntityTooLarge)
+		http.Error(w, fmt.Sprintf("request is larger than %d bytes", h.MaxRequestBytes), http.StatusRequestEntityTooLarge)
 	case errors.Is(err, os.ErrDeadlineExceeded):
 		h.Metrics.Limited("slow_body")
 		http.Error(w, "request body too slow", http.StatusRequestTimeout)
@@ -307,6 +334,7 @@ func (h *handler) requireChain(next http.Handler) http.Handler {
 		if !exists {
 			// The client connects again later, by when its first
 			// GetUpdates has created the chain.
+			infoOf(r.Context()).expected = true
 			w.Header().Set("Retry-After", "30")
 			http.Error(w, "no such sync chain", http.StatusNotFound)
 			return
@@ -359,7 +387,7 @@ func (h *handler) readyz(w http.ResponseWriter, r *http.Request) {
 }
 
 // decode returns a request body, decompressed if the client compressed it.
-func decode(raw []byte, encoding string) ([]byte, error) {
+func decode(raw []byte, encoding string, maxBytes int64) ([]byte, error) {
 	switch strings.ToLower(encoding) {
 	case "", "identity":
 		return raw, nil
@@ -369,12 +397,12 @@ func decode(raw []byte, encoding string) ([]byte, error) {
 			return nil, errors.New("malformed gzip body")
 		}
 		defer gz.Close()
-		data, err := io.ReadAll(io.LimitReader(gz, maxRequestBytes+1))
+		data, err := io.ReadAll(io.LimitReader(gz, maxBytes+1))
 		if err != nil {
 			return nil, errors.New("malformed gzip body")
 		}
-		if len(data) > maxRequestBytes {
-			return nil, fmt.Errorf("request is larger than %d bytes", maxRequestBytes)
+		if int64(len(data)) > maxBytes {
+			return nil, fmt.Errorf("request is larger than %d bytes", maxBytes)
 		}
 		return data, nil
 	default:
