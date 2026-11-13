@@ -79,6 +79,8 @@ type AccountStore interface {
 	// CreateAccount stores a new account with its first envelope and
 	// device. It returns ErrEnvelopeTaken if the envelope ID is in use.
 	CreateAccount(ctx context.Context, a Account, e Envelope, d Device) error
+	// Account returns the account with id, or false.
+	Account(ctx context.Context, id string) (Account, bool, error)
 	// Envelope returns the envelope with id, or false.
 	Envelope(ctx context.Context, id string) (Envelope, bool, error)
 	// AccountEnvelope returns the account's envelope of scheme, or false.
@@ -110,6 +112,8 @@ type AccountStore interface {
 	// and the chains it claimed with all their data. It returns the chains
 	// that were removed.
 	DeleteAccount(ctx context.Context, accountID string) ([]string, error)
+	// CountAccounts counts the accounts.
+	CountAccounts(ctx context.Context) (int64, error)
 	// ServerSecret returns a random secret of the server, the same for all
 	// its instances and restarts, creating it on first use.
 	ServerSecret(ctx context.Context, name string) ([]byte, error)

@@ -71,6 +71,15 @@ func (s *Store) CreateAccount(_ context.Context, a store.Account, e store.Envelo
 	return nil
 }
 
+func (s *Store) Account(_ context.Context, id string) (store.Account, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a, ok := s.accounts[id]; ok {
+		return a.Account, true, nil
+	}
+	return store.Account{}, false, nil
+}
+
 func (s *Store) Envelope(_ context.Context, id string) (store.Envelope, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -235,4 +244,10 @@ func (s *Store) collectDevices(cutoff time.Time) int64 {
 		})
 	}
 	return n
+}
+
+func (s *Store) CountAccounts(context.Context) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return int64(len(s.accounts)), nil
 }

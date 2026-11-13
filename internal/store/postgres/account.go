@@ -38,6 +38,18 @@ func (s *Store) CreateAccount(ctx context.Context, a store.Account, e store.Enve
 	return nil
 }
 
+func (s *Store) Account(ctx context.Context, id string) (store.Account, bool, error) {
+	a := store.Account{ID: id}
+	err := s.pool.QueryRow(ctx, `SELECT kind, created_at FROM accounts WHERE id = $1`, id).Scan(&a.Kind, &a.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.Account{}, false, nil
+	}
+	if err != nil {
+		return store.Account{}, false, fmt.Errorf("read account: %w", err)
+	}
+	return a, true, nil
+}
+
 func (s *Store) readEnvelope(ctx context.Context, where string, args ...any) (store.Envelope, bool, error) {
 	var e store.Envelope
 	err := s.pool.QueryRow(ctx, `SELECT `+envelopeColumns+` FROM envelopes WHERE `+where, args...).Scan(
@@ -257,6 +269,14 @@ func (s *Store) DeleteAccount(ctx context.Context, accountID string) ([]string, 
 		return nil, fmt.Errorf("delete account: %w", err)
 	}
 	return removed, nil
+}
+
+func (s *Store) CountAccounts(ctx context.Context) (int64, error) {
+	var n int64
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM accounts`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count accounts: %w", err)
+	}
+	return n, nil
 }
 
 // collectDevices removes the records of devices removed before cutoff.
