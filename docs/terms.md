@@ -6,8 +6,15 @@ not by these terms.
 
 ## The service
 
-- sync.alerse.app syncs Alerse between your devices. It is free, run by one person
-  (VizzleTF on GitHub) in their own time, and holds a few accounts for now.
+- Prefer a server of your own: this repository runs in Docker or Kubernetes in a few
+  minutes ([Run your own server](../README.md#run-your-own-server)), and your data stays
+  with you.
+- sync.alerse.app is there for those who would rather not run one. It is free, offered
+  voluntarily by one person (VizzleTF on GitHub) in their own time, and holds a few
+  accounts for now.
+- The operator takes no responsibility for the data on sync.alerse.app: for its loss,
+  its availability or anything that follows from it. It is encrypted on your devices,
+  so the operator cannot read it either.
 - It has no guaranteed uptime. It may be down, slow, limited or changed. It may be shut
   down; if so, it is announced in the
   [alerse-sync repository](https://github.com/VizzleTF/alerse-sync) at least 30 days

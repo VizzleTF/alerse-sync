@@ -222,7 +222,9 @@ to a new Chromium version, refresh them with `scripts/update-protos.sh
 
 ## The Alerse server
 
-sync.alerse.app runs this server for Alerse users. Its
+Running your own server is the better choice: your data stays with you. For those who
+would rather not, sync.alerse.app runs this server for Alerse users, offered voluntarily
+and without any guarantee; its operator takes no responsibility for the data on it. Its
 [privacy policy](docs/privacy.md) says what it keeps and for how long, its
 [terms](docs/terms.md) how it may be used. A server you run yourself follows your own
 rules: you are the controller of its data.
