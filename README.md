@@ -220,6 +220,17 @@ The protocol definitions in `proto/` come from Chromium. After moving Alerse
 to a new Chromium version, refresh them with `scripts/update-protos.sh
 <chromium src>` (needs `protoc` and `protoc-gen-go`).
 
+## The Alerse server
+
+sync.alerse.app runs this server for Alerse users. Its
+[privacy policy](docs/privacy.md) says what it keeps and for how long, its
+[terms](docs/terms.md) how it may be used. A server you run yourself follows your own
+rules: you are the controller of its data.
+
+## Security
+
+Report a vulnerability privately: [SECURITY.md](https://github.com/VizzleTF/alerse/blob/main/SECURITY.md).
+
 ## License
 
 BSD-3-Clause. The files in `proto/` are Chromium's, under
