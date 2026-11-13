@@ -257,6 +257,127 @@ the slot, and the user makes a new code. A relay that answered both sides with
 its own messages would need the code too, and the number on both screens shows
 it.
 
+## Accounts (/v3)
+
+An account is a user's set of devices and the chains they sync. Each device
+signs its requests with an Ed25519 key of its own, so the server can list
+devices and refuse a removed one. The server keeps the account key only in an
+envelope it cannot open. `internal/account` implements it; the design is
+ADR-0002 of Alerse. This server offers one scheme, `sk-v1`: the 24 words and a
+password, no email.
+
+**What the client derives** (scheme `sk-v1`). HKDF-SHA256 takes no salt and
+gives 32 bytes; the password is UTF-8 in Unicode NFC.
+
+```text
+sk      = the 256 bits the 24 words encode
+id      = hex(HKDF-SHA256(sk, info "alerse-sk-id"))      names the envelope
+salt    = 32 random bytes, chosen by the client when it creates the account
+pwkey   = scrypt(password, salt, N, r, p, 32 bytes)
+master  = HKDF-SHA256(pwkey | HKDF-SHA256(sk, info "alerse-sk-mix"), info "alerse-sk-v1")
+auth    = HKDF-SHA256(master, info "alerse-sk-auth")     sent to the server
+wrap    = HKDF-SHA256(master, info "alerse-sk-wrap")     never leaves the device
+wrapped = 0x01 | nonce (12) | AES-256-GCM(wrap, nonce, account key, aad "alerse-sk-v1" | id)
+```
+
+The KDF parameters are those of `pw-v1`: scrypt with N = 2^17, r = 8, p = 1 by
+default, and the server refuses N below 2^15 or more than 1 GiB. Clients
+refuse parameters below their own as well. Without the words nobody can name
+the envelope or test a password offline; without the password the words open
+nothing. The account key is 32 random bytes made on the first device; the
+account's chains derive from it as from today's chain secret (ADR-0001).
+`e2e/accounts_test.go` derives all of this as a client does.
+
+**Device tokens.** Every authenticated `/v3` request carries
+`Authorization: Bearer <token>`:
+
+```text
+token     = base64url, no padding (0x02 | account (32) | device public key (32) | issued at (8) | signature (64))
+issued at = Unix time in milliseconds, 8 bytes big-endian
+signature = Ed25519(device key, "alerse-sync-device-token-v1" | account | public key | issued at)
+```
+
+`account` is the account ID the server handed out, as 32 bytes. The time
+window is the chain token's. On every request the server checks that the key
+is an active device of the account, so a removed device is refused from its
+next request on. A chain token never passes as a device token, nor the other
+way round.
+
+**Requests.** Bodies are JSON; byte strings are standard base64. IDs are 64
+lowercase hex digits; a device's ID is its public key in hex.
+
+| Request | Auth | Body | Answer |
+|---|---|---|---|
+| `POST /v3/unlock/params` | none | `{"id"}` | `{"scheme","salt","kdf":{"name":"scrypt","n","r","p"}}` |
+| `POST /v3/account` | none | `{"id","scheme","salt","kdf","auth","wrapped","device":{"public_key","name"}}` | 201 `{"account"}`; 409 if the words have an account |
+| `POST /v3/unlock` | none | `{"id","auth","device":{"public_key","name"}}` | `{"account","wrapped"}`; 401 `wrong words or password`; 409 for a removed key or too many devices |
+| `GET /v3/account` | device | | `{"account","kind","created"}` |
+| `DELETE /v3/account` | device | `{"auth"}` | 204 |
+| `GET /v3/devices` | device | | `{"devices":[{"id","name","created","last_seen","current"}]}` |
+| `DELETE /v3/devices/{id}` | device | `{"auth"}` | 204; 404; 409 for the account's only device |
+| `POST /v3/chains/{chain}/command/` | device | protocol | as `POST /v2/command/` |
+| `GET /v3/chains/{chain}/events` | device | | as `GET /v2/events` |
+
+- **Create** makes the account with its first device. **Unlock** adds the
+  device that sends it, or renames it if it is in the account already. A
+  device name is 1 to 64 characters without control characters.
+- **Removing a device or the account** takes `auth` again, so a stolen device
+  that is still signed in cannot lock its owner out. A device may remove
+  itself while another one is left; the last one goes only with the account.
+  A removed key never joins the account again: the client makes a new key.
+- **Deleting the account** removes its envelope, devices and chains with all
+  their data, as ClearServerData does for one chain. The chains' event streams
+  get `changed`, and the devices' next requests get 401.
+
+**An account's chains.** A Space's sync URL is
+`https://<server>/v3/chains/<chain>`; Chromium adds `/command/` and the events
+client `/events`. `chain` is the chain ID as on `/v2`: hex(SHA-256) of the
+chain's public key, which derives from the account key. A chain becomes the
+account's the first time one of its devices uses it, and stays the account's
+after a ClearServerData. These get 403:
+
+- a chain of another account;
+- an existing chain of no account: an account cannot take over a chain of the
+  old scheme, so its chains always start empty;
+- a chain over `MAX_CHAINS_PER_ACCOUNT`;
+- a chain token of an account's chain, on every `/v2` endpoint. Every device of
+  the account knows the chain keys, a removed one too, so only device tokens
+  reach these chains.
+
+Everything else is the protocol of `/v2`: birthdays, limits, rate limits per
+chain and address, commit delays and events.
+
+**No enumeration.** For an `id` without an account, params answers the
+default KDF and a salt made up with HMAC-SHA256 under a server secret, and
+unlock does the same Argon2id work before its 401, as `/v2/login` does. Create
+answers 409 for an `id` in use, which tells nothing: only whoever holds the
+words can derive the `id`.
+
+**Rate limits.** Over a limit the answer is 429 with `Retry-After`:
+
+| Limit | Counts |
+|---|---|
+| `NEW_ACCOUNTS_PER_IP_PER_DAY` (10) | Creates per client address |
+| `UNLOCK_LOOKUPS_PER_IP_PER_HOUR` (120) | Params per client address |
+| `UNLOCK_ATTEMPTS_PER_HOUR` (10) | Password checks per envelope: unlocks, and `auth` on removals. The right password counts too |
+| `UNLOCK_ATTEMPTS_PER_IP_PER_HOUR` (30) | Password checks per client address |
+| `ACCOUNT_CHANGES_PER_HOUR` (120) | Account and device requests per account |
+
+`MAX_ACCOUNTS` answers 503 to a create when the server is full,
+`MAX_DEVICES_PER_ACCOUNT` 409 to an unlock with a new key.
+
+**What the server learns:** the envelope id, the client's salt and KDF
+parameters, Argon2id of `auth` (19 MiB, 2 passes, a random salt of its own),
+the wrapped account key, the devices' public keys and names, when each was
+created and last seen (to 5 minutes), and which chains are one account. It
+never learns the words, the password or the account key. A copy of the
+database alone allows no password guessing: each guess needs the words too.
+
+**Not built yet:** email accounts (`email-v1`) and their recovery code
+(`rk-v1`), pairing into an account (`/v3/pair`), changing the password or the
+keys. The event stream of a removed device stays open until it reconnects; it
+carries only data type numbers.
+
 ## Events
 
 `GET /v2/events?cache_guid=<the device's cache GUID>` opens a Server-Sent Events
@@ -288,6 +409,10 @@ next poll, which the server sets to once an hour.
 | `logins` | A chain's optional sign-in: a hash of the login name, the client's salt and KDF parameters, an Argon2id hash of the authentication key, the chain secret encrypted on the device |
 | `server_secrets` | Random values shared by all instances, such as the key for made-up salts |
 | `pair_slots` | Pairings in progress, for 5 minutes: the slot id, the chain, the SPAKE2 messages, the new device's name and confirmation, the encrypted secret |
+| `accounts` | Account ID (random), kind (`sk`), when it was created |
+| `envelopes` | Per account and scheme: the envelope id, the client's salt and KDF parameters, an Argon2id hash of the authentication key, the account key encrypted on the device |
+| `devices` | Per account: each device's public key and name, when it was created, last seen and removed |
+| `account_chains` | Which account claimed a chain. It outlives the chain, so a chain cleared and created again stays the account's |
 
 **Encryption.** With a sync passphrase, Chromium encrypts every data type with a
 key derived from the passphrase. The server then stores only ciphertext, plus
@@ -311,6 +436,7 @@ since downloads the data type again, as described under
 | History and history delete directives | `HISTORY_TTL`, 90 days since they were last written | Chromium keeps 90 days of history and sends nothing when a visit expires: Google's server expires history itself, and so does this one. A directive outlives the history it deletes |
 | Chains no device committed to | `EMPTY_CHAIN_TTL`, 7 days | Every Chromium device commits its device info right away; a chain with only its permanent entities was never used |
 | Chains no device talked to | `INACTIVE_CHAIN_TTL`, off by default | Abandoned chains on a public server |
+| Records of removed devices | `REMOVED_DEVICE_TTL`, 90 days | Until then the removed key cannot join the account again |
 
 Removing data takes the chain's lock, one chain at a time, so it never races a
 commit. With several instances, one runs the job at a time.

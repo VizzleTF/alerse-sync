@@ -25,6 +25,9 @@ it needs only PostgreSQL. A free public server is planned.
   relays.
 - **End-to-end encrypted** when the chain sets a passphrase: the server stores
   data it cannot read, and can be told to refuse anything else.
+- **Accounts (new, `/v3`).** Devices sign in with the 24 words and a
+  password, each with a key of its own, so a lost device can be removed. The
+  server holds the account key only as the device encrypted it.
 - **Real-time.** A device that commits a change wakes the chain's other devices
   over Server-Sent Events.
 - **Speaks Chromium's sync protocol**, so every data type Chromium syncs works,
@@ -106,6 +109,14 @@ or duration of `0` turns it off.
 | `PAIR_CODES_PER_HOUR` | `20` | Pairing codes a sync chain may open |
 | `PAIR_JOINS_PER_IP_PER_HOUR` | `30` | Pairing joins per client address |
 | `PAIR_READS_PER_IP_PER_HOUR` | `1200` | Pairing slot reads per client address; a waiting device reads every 2 seconds |
+| `NEW_ACCOUNTS_PER_IP_PER_DAY` | `10` | Accounts one address may create |
+| `UNLOCK_ATTEMPTS_PER_HOUR` | `10` | Password checks per account, right or wrong: sign-ins and removing a device or the account |
+| `UNLOCK_ATTEMPTS_PER_IP_PER_HOUR` | `30` | Password checks of accounts per client address |
+| `UNLOCK_LOOKUPS_PER_IP_PER_HOUR` | `120` | Account sign-in parameter lookups per client address |
+| `ACCOUNT_CHANGES_PER_HOUR` | `120` | Account and device requests per account |
+| `MAX_ACCOUNTS` | `0` | Accounts the server keeps |
+| `MAX_DEVICES_PER_ACCOUNT` | `50` | Signed-in devices per account |
+| `MAX_CHAINS_PER_ACCOUNT` | `50` | Sync chains per account, one per Space |
 | `MAX_CHAINS` | `0` | Sync chains the server keeps |
 | `MAX_CONCURRENT_REQUESTS` | `64` | Protocol requests handled at once, which bounds memory |
 | `BODY_READ_TIMEOUT` | `20s` | Time a client has to send a request body |
@@ -123,6 +134,7 @@ or duration of `0` turns it off.
 | `HISTORY_TTL` | `90d` | How long history is kept after it was last written; Chromium keeps 90 days and leaves expiry to the server |
 | `EMPTY_CHAIN_TTL` | `7d` | Removes chains no device ever committed to |
 | `INACTIVE_CHAIN_TTL` | `0` | Removes chains no device contacted for this long |
+| `REMOVED_DEVICE_TTL` | `90d` | How long the record of a removed device is kept; meanwhile its key cannot join again |
 | `RETENTION_INTERVAL` | `1h` | How often the retention job runs |
 
 Several instances can share one database behind a load balancer: events reach
@@ -150,15 +162,19 @@ METRICS_ADDR=127.0.0.1:9295
 | `GET /v2/events` | Change events of a sync chain |
 | `/v2/login` | Optional sign-in with a login name and password: set, change, remove, and join with it |
 | `/v2/pair` | Relay for pairing a new device with a short code |
+| `POST /v3/chains/{chain}/command/` | Chromium sync protocol, for a chain of an account |
+| `GET /v3/chains/{chain}/events` | Change events of a chain of an account |
+| `/v3/account`, `/v3/unlock` | Accounts with the 24 words and a password: create, sign a device in, delete |
+| `/v3/devices` | An account's devices: list, remove |
 | `GET /health` | `200 ok` while the database answers, `503` otherwise |
 | `GET /livez` | `200` while the process runs |
 | `GET /readyz` | `200` while the server takes requests; `503` when the database is down or it is shutting down |
 | `GET /metrics` | Prometheus metrics, on `METRICS_ADDR` only |
 
 Clients authenticate the `/v2` endpoints with a signed token, except the
-requests of a device that joins with a sign-in or a pairing code. The token
-format, the events, the sign-in, pairing, the limits and what the server keeps
-are in
+requests of a device that joins with a sign-in or a pairing code, and `/v3`
+with a token of the device's own key. The token formats, the events, the
+sign-in, pairing, accounts, the limits and what the server keeps are in
 [How the server works](docs/protocol.md).
 
 ## Operate
