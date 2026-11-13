@@ -33,6 +33,9 @@ type Store struct {
 	chains  map[string]*chain
 	secrets map[string][]byte
 	slots   map[string]*store.PairSlot
+	// accounts and claims (chain ID to account ID) are set up on first use.
+	accounts map[string]*account
+	claims   map[string]string
 }
 
 // New returns an empty store.
@@ -195,6 +198,9 @@ func (s *Store) Collect(_ context.Context, r store.Retention) (store.Collected, 
 			c.state.Types[e.DataType] = state
 			done.Tombstones++
 		}
+	}
+	if r.RemovedDeviceTTL > 0 {
+		done.RemovedDevices = s.collectDevices(r.Now.Add(-r.RemovedDeviceTTL))
 	}
 	return done, nil
 }

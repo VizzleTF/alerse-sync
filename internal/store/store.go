@@ -128,6 +128,10 @@ type Retention struct {
 	// InactiveChainTTL removes chains no device talked to for that long; 0
 	// keeps them.
 	InactiveChainTTL time.Duration
+	// RemovedDeviceTTL removes the records of devices removed from their
+	// account that long ago; 0 keeps them. While a record is kept, the
+	// device's key cannot join the account again.
+	RemovedDeviceTTL time.Duration
 	// Batch bounds the rows one statement removes.
 	Batch int
 }
@@ -138,6 +142,7 @@ type Collected struct {
 	Expired        int64
 	EmptyChains    int64
 	InactiveChains int64
+	RemovedDevices int64
 }
 
 // Store is the storage of all sync chains.

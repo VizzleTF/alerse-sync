@@ -74,6 +74,12 @@ func (s *Store) Collect(ctx context.Context, r store.Retention) (store.Collected
 			return done, fmt.Errorf("remove tombstones: %w", err)
 		}
 	}
+	if r.RemovedDeviceTTL > 0 {
+		done.RemovedDevices, err = s.collectDevices(ctx, r.Now.Add(-r.RemovedDeviceTTL))
+		if err != nil {
+			return done, fmt.Errorf("remove device records: %w", err)
+		}
+	}
 	return done, nil
 }
 

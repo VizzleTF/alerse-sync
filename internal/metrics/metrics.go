@@ -154,6 +154,7 @@ func (m *Metrics) Collected(c store.Collected) {
 	m.collected.WithLabelValues("expired").Add(float64(c.Expired))
 	m.collected.WithLabelValues("empty_chains").Add(float64(c.EmptyChains))
 	m.collected.WithLabelValues("inactive_chains").Add(float64(c.InactiveChains))
+	m.collected.WithLabelValues("removed_devices").Add(float64(c.RemovedDevices))
 }
 
 // poolCollector reports pgxpool statistics.
