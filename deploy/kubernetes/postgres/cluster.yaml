@@ -1,0 +1,16 @@
+# Optional: Postgres in the cluster with CloudNativePG (its operator must be
+# installed). kubectl apply -n alerse-sync -f deploy/kubernetes/postgres/cluster.yaml
+# The operator creates the secret alerse-sync-db-app with the password, and the
+# service alerse-sync-db-rw that DATABASE_URL points at.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: alerse-sync-db
+spec:
+  instances: 2
+  storage:
+    size: 10Gi
+  bootstrap:
+    initdb:
+      database: arcomium
+      owner: arcomium

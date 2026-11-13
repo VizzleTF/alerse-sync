@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: alerse-sync
+  labels:
+    app.kubernetes.io/name: alerse-sync
+spec:
+  selector:
+    app.kubernetes.io/name: alerse-sync
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

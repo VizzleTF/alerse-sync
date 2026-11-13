@@ -1,0 +1,19 @@
+# alerse-sync on Kubernetes: kubectl apply -k deploy/kubernetes
+# docs/kubernetes.md explains each file and what to change.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: alerse-sync
+resources:
+  - namespace.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
+# DATABASE_URL comes from this file, which is not committed (see secret.env.example).
+secretGenerator:
+  - name: alerse-sync
+    envs:
+      - secret.env
+    options:
+      disableNameSuffixHash: true

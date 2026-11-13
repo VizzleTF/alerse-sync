@@ -50,6 +50,9 @@ describes. Plain HTTP is fine on loopback or a private network, never over the
 internet. A Cloudflare Tunnel also works; set `TRUSTED_PROXY` to the tunnel's
 address and `CLIENT_IP_HEADER=CF-Connecting-IP`.
 
+On Kubernetes, use the manifests in `deploy/kubernetes`:
+[Run alerse-sync on Kubernetes](docs/kubernetes.md) walks through them.
+
 Without Docker, take the binary for your system from
 [Releases](https://github.com/VizzleTF/alerse-sync/releases) and point it at a
 Postgres database:

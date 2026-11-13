@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alerse-sync
+  labels:
+    app.kubernetes.io/name: alerse-sync
+spec:
+  # Instances share the database; events reach every instance through Postgres
+  # NOTIFY, and the retention job runs on one at a time.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alerse-sync
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alerse-sync
+    spec:
+      # SHUTDOWN_DELAY, then up to 30 s for requests in progress.
+      terminationGracePeriodSeconds: 45
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: alerse-sync
+      containers:
+        - name: alerse-sync
+          image: ghcr.io/vizzletf/alerse-sync:0.1.3
+          ports:
+            - name: http
+              containerPort: 8295
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: alerse-sync
+                  key: DATABASE_URL
+            # The ingress controller's pods name the client in X-Forwarded-For.
+            # Set this to your cluster's pod network.
+            - name: TRUSTED_PROXY
+              value: 10.0.0.0/8
+            # Fail /readyz this long before stopping, so the Service stops
+            # sending requests first.
+            - name: SHUTDOWN_DELAY
+              value: 10s
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              # Each sign-in hashes with Argon2id (19 MiB); MAX_CONCURRENT_REQUESTS
+              # bounds the rest.
+              memory: 512Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]

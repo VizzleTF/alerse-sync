@@ -1,0 +1,29 @@
+# For ingress-nginx and cert-manager. Another controller needs the same three
+# things: request bodies up to 32 MiB, no buffering of responses (the event
+# stream), and an idle timeout over 30 s.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: alerse-sync
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/proxy-body-size: 32m
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [sync.example.com]
+      secretName: alerse-sync-tls
+  rules:
+    - host: sync.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: alerse-sync
+                port:
+                  name: http

@@ -1,0 +1,18 @@
+# Only the ingress controller reaches the server. Change the namespace label if
+# your controller runs elsewhere than ingress-nginx.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: alerse-sync
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alerse-sync
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: http
