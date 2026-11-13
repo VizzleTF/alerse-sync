@@ -63,7 +63,7 @@ func (j Job) Once(ctx context.Context) {
 	}
 	if done != (store.Collected{}) {
 		j.Log.Info("retention job removed old data", "tombstones", done.Tombstones, "expired", done.Expired,
-			"empty_chains", done.EmptyChains, "inactive_chains", done.InactiveChains,
+			"empty_chains", done.EmptyChains, "inactive_chains", done.InactiveChains, "removed_devices", done.RemovedDevices,
 			"took", time.Since(start).Round(time.Millisecond))
 	}
 }

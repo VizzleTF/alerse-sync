@@ -212,6 +212,13 @@ func (s *Service) clear(ctx context.Context, chainID string, msg *pb.ClientToSer
 	return nil
 }
 
+// Cleared tells the devices of a chain that was removed outside the
+// protocol, such as with its account, to fetch updates: they get
+// NOT_MY_BIRTHDAY or a refused token and stop.
+func (s *Service) Cleared(ctx context.Context, chainID string) {
+	s.notify(ctx, chainID, "", []int32{nigoriType})
+}
+
 func (s *Service) notify(ctx context.Context, chainID, cacheGUID string, dataTypes []int32) {
 	if s.notifier != nil && len(dataTypes) > 0 {
 		s.notifier.Notify(ctx, chainID, cacheGUID, dataTypes)

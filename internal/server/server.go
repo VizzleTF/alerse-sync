@@ -1,10 +1,10 @@
 // Package server is the HTTP interface of the sync server:
 //
-//	POST /v2/command/   Chromium sync protocol (protobuf), authenticated
-//	GET  /v2/events     Server-Sent Events of a chain, authenticated
-//	/v2/login...        optional sign-in with a login name and password
-//	                    (internal/login)
-//	/v2/pair...         relay for pairing a new device (internal/pairing)
+//	/v3/account, /v3/unlock..., /v3/devices...
+//	                    accounts with device keys (internal/account)
+//	POST /v3/chains/{chain}/command/, GET /v3/chains/{chain}/events
+//	                    the protocol and events of an account's chain,
+//	                    authenticated by a device token
 //	GET  /health        200 when the database answers
 //	GET  /livez         200 while the process runs
 //	GET  /readyz        200 when the server takes requests: the database
@@ -28,6 +28,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/VizzleTF/arcomium-sync/internal/account"
 	"github.com/VizzleTF/arcomium-sync/internal/auth"
 	"github.com/VizzleTF/arcomium-sync/internal/clientip"
 	"github.com/VizzleTF/arcomium-sync/internal/metrics"
@@ -59,9 +60,8 @@ const (
 type Config struct {
 	Service *protocol.Service
 	Events  http.Handler
-	// Login serves /v2/login, Pair /v2/pair; nil leaves them out.
-	Login http.Handler
-	Pair  http.Handler
+	// Accounts serves /v3: accounts, devices and their chains.
+	Accounts *account.Accounts
 	// Limiter limits requests per sync chain, AddrLimiter per client
 	// address; nil for no limit.
 	Limiter     *ratelimit.Limiter
@@ -104,21 +104,17 @@ func Handler(c Config) http.Handler {
 		h.slots = make(chan struct{}, c.MaxConcurrent)
 		h.readers = make(chan struct{}, c.MaxConcurrent*readersPerSlot)
 	}
-	command := h.limitAddr(true, auth.Middleware(h.named(http.HandlerFunc(h.command))))
-	events := h.limitAddr(false, auth.Middleware(h.named(h.limitChain(h.requireChain(c.Events)))))
 	mux := http.NewServeMux()
-	mux.Handle("POST /v2/command/{$}", command)
-	mux.Handle("POST /v2/command", command)
-	mux.Handle("GET /v2/events", events)
-	if c.Login != nil {
-		login := h.limitAddr(false, c.Login)
-		mux.Handle("/v2/login", login)
-		mux.Handle("/v2/login/", login)
-	}
-	if c.Pair != nil {
-		pair := h.limitAddr(false, c.Pair)
-		mux.Handle("/v2/pair", pair)
-		mux.Handle("/v2/pair/", pair)
+	if a := c.Accounts; a != nil {
+		chain := func(next http.Handler) http.Handler { return a.Authenticate(a.ChainAccess(h.named(next))) }
+		command := h.limitAddr(true, chain(http.HandlerFunc(h.command)))
+		mux.Handle("POST /v3/chains/{chain}/command/{$}", command)
+		mux.Handle("POST /v3/chains/{chain}/command", command)
+		mux.Handle("GET /v3/chains/{chain}/events", h.limitAddr(false, chain(h.limitChain(h.requireChain(c.Events)))))
+		api := h.limitAddr(false, a.Handler())
+		for _, path := range []string{"/v3/account", "/v3/unlock", "/v3/unlock/", "/v3/devices", "/v3/devices/"} {
+			mux.Handle(path, api)
+		}
 	}
 	mux.HandleFunc("GET /health", h.health)
 	mux.HandleFunc("GET /livez", h.livez)

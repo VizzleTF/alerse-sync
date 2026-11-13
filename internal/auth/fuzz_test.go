@@ -2,20 +2,21 @@ package auth
 
 import (
 	"crypto/ed25519"
+	"strings"
 	"testing"
 	"time"
 )
 
-func FuzzVerify(f *testing.F) {
+func FuzzVerifyDevice(f *testing.F) {
 	_, key, _ := ed25519.GenerateKey(nil)
 	now := time.Now()
-	f.Add(NewToken(key, now))
+	f.Add(NewDeviceToken(key, strings.Repeat("ab", 32), now))
 	f.Add("")
-	f.Add("AQ")
+	f.Add("Ag")
 	f.Fuzz(func(t *testing.T, token string) {
-		chainID, err := Verify(token, now)
-		if err == nil && len(chainID) != 64 {
-			t.Fatalf("chain ID %q", chainID)
+		d, err := VerifyDevice(token, now)
+		if err == nil && (len(d.Account) != 64 || len(d.PublicKey) != ed25519.PublicKeySize) {
+			t.Fatalf("device %+v", d)
 		}
 	})
 }

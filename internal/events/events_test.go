@@ -3,7 +3,8 @@ package events
 import (
 	"bufio"
 	"context"
-	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -62,12 +63,11 @@ func next(t *testing.T, lines <-chan string) string {
 
 func TestHub(t *testing.T) {
 	hub := New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)), 2, 100)
-	server := httptest.NewServer(auth.Middleware(hub))
+	server := httptest.NewServer(withChain(hub))
 	defer server.Close()
 
-	key := newKey(t)
-	token := auth.NewToken(key, time.Now())
-	chainID, _ := auth.Verify(token, time.Now())
+	chainID := newChain(t)
+	token := chainID
 
 	a, stopA := stream(t, server, token, "a")
 	defer stopA()
@@ -116,13 +116,22 @@ func TestSubscriberMergesPendingEvents(t *testing.T) {
 	}
 }
 
-func newKey(t *testing.T) ed25519.PrivateKey {
+// newChain returns a random chain ID; the tests send it as the bearer
+// token, and withChain puts it in the context as account.ChainAccess would.
+func newChain(t *testing.T) string {
 	t.Helper()
-	_, key, err := ed25519.GenerateKey(nil)
-	if err != nil {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
 		t.Fatal(err)
 	}
-	return key
+	return hex.EncodeToString(raw)
+}
+
+func withChain(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chainID := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		next.ServeHTTP(w, r.WithContext(auth.WithChain(r.Context(), chainID)))
+	})
 }
 
 func status(t *testing.T, server *httptest.Server, token string) int {
@@ -141,12 +150,12 @@ func TestStreamsPerAddress(t *testing.T) {
 	hub := New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)), 10, 100)
 	hub.MaxPerAddr = 2
 	var resolver *clientip.Resolver
-	server := httptest.NewServer(resolver.Middleware(auth.Middleware(hub)))
+	server := httptest.NewServer(resolver.Middleware(withChain(hub)))
 	defer server.Close()
 
 	// Two chains from the same address.
-	first := auth.NewToken(newKey(t), time.Now())
-	second := auth.NewToken(newKey(t), time.Now())
+	first := newChain(t)
+	second := newChain(t)
 	a, stopA := stream(t, server, first, "a")
 	next(t, a)
 	b, stopB := stream(t, server, second, "b")
@@ -169,9 +178,9 @@ func TestStreamsPerAddress(t *testing.T) {
 
 func TestClose(t *testing.T) {
 	hub := New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)), 10, 100)
-	server := httptest.NewServer(auth.Middleware(hub))
+	server := httptest.NewServer(withChain(hub))
 	defer server.Close()
-	token := auth.NewToken(newKey(t), time.Now())
+	token := newChain(t)
 	lines, stop := stream(t, server, token, "a")
 	defer stop()
 	next(t, lines)

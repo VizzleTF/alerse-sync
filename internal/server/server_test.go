@@ -4,38 +4,35 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/ed25519"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"google.golang.org/protobuf/proto"
 
-	"github.com/VizzleTF/arcomium-sync/internal/auth"
 	"github.com/VizzleTF/arcomium-sync/internal/protocol"
 	"github.com/VizzleTF/arcomium-sync/internal/ratelimit"
 	"github.com/VizzleTF/arcomium-sync/internal/store/memory"
 	pb "github.com/VizzleTF/arcomium-sync/internal/syncpb"
 )
 
-func newHandler(t *testing.T, perMinute int, health error) (http.Handler, string) {
+// newHandler returns a handler and the command path and token of a chain.
+func newHandler(t *testing.T, perMinute int, health error) (h http.Handler, command, token string) {
 	t.Helper()
-	_, key, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := Handler(Config{
-		Service: protocol.New(memory.New(), nil, protocol.DefaultLimits),
-		Events:  http.NotFoundHandler(),
-		Limiter: ratelimit.New(perMinute),
-		Health:  func(context.Context) error { return health },
-		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	st := memory.New()
+	h = Handler(Config{
+		Service:  protocol.New(st, nil, protocol.DefaultLimits),
+		Events:   http.NotFoundHandler(),
+		Accounts: accountsFor(st),
+		Limiter:  ratelimit.New(perMinute),
+		Health:   func(context.Context) error { return health },
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	return h, auth.NewToken(key, time.Now())
+	command, _, token = testChain(t, st)
+	return h, command, token
 }
 
 func getUpdates(t *testing.T) []byte {
@@ -111,7 +108,7 @@ func response(t *testing.T, rec *httptest.ResponseRecorder) *pb.ClientToServerRe
 }
 
 func TestCommand(t *testing.T) {
-	h, token := newHandler(t, 0, nil)
+	h, cmd, token := newHandler(t, 0, nil)
 	body := getUpdates(t)
 
 	tests := []struct {
@@ -120,15 +117,15 @@ func TestCommand(t *testing.T) {
 		status int
 		gzip   bool
 	}{
-		{"plain", request{path: "/v2/command/?client=Chromium&client_id=x", body: body, token: token}, 200, false},
-		{"no trailing slash", request{path: "/v2/command", body: body, token: token}, 200, false},
+		{"plain", request{path: cmd + "/?client=Chromium&client_id=x", body: body, token: token}, 200, false},
+		{"no trailing slash", request{path: cmd, body: body, token: token}, 200, false},
 		// The response is too small to compress.
-		{"gzip request", request{path: "/v2/command/", body: gzipped(t, body), token: token,
+		{"gzip request", request{path: cmd + "/", body: gzipped(t, body), token: token,
 			encoding: "gzip", accept: "gzip, deflate"}, 200, false},
-		{"no token", request{path: "/v2/command/", body: body}, 401, false},
-		{"not protobuf", request{path: "/v2/command/", body: []byte("hello"), token: token}, 400, false},
-		{"bad gzip", request{path: "/v2/command/", body: body, token: token, encoding: "gzip"}, 400, false},
-		{"unknown encoding", request{path: "/v2/command/", body: body, token: token, encoding: "br"}, 400, false},
+		{"no token", request{path: cmd + "/", body: body}, 401, false},
+		{"not protobuf", request{path: cmd + "/", body: []byte("hello"), token: token}, 400, false},
+		{"bad gzip", request{path: cmd + "/", body: body, token: token, encoding: "gzip"}, 400, false},
+		{"unknown encoding", request{path: cmd + "/", body: body, token: token, encoding: "br"}, 400, false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -185,8 +182,8 @@ func TestWriteBody(t *testing.T) {
 }
 
 func TestCommandThrottled(t *testing.T) {
-	h, token := newHandler(t, 1, nil)
-	req := request{path: "/v2/command/", body: getUpdates(t), token: token}
+	h, cmd, token := newHandler(t, 1, nil)
+	req := request{path: cmd + "/", body: getUpdates(t), token: token}
 	if rsp := response(t, do(h, req)); rsp.GetErrorCode() != pb.SyncEnums_SUCCESS {
 		t.Fatalf("first request: %v", rsp.GetErrorCode())
 	}
@@ -201,7 +198,7 @@ func TestHealth(t *testing.T) {
 		err    error
 		status int
 	}{{nil, 200}, {errors.New("down"), 503}} {
-		h, _ := newHandler(t, 0, test.err)
+		h, _, _ := newHandler(t, 0, test.err)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 		if rec.Code != test.status {

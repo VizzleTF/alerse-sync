@@ -19,7 +19,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if c.port != 8295 || c.limits != protocol.DefaultLimits || c.retention.TombstoneTTL != 60*day ||
 		c.retention.ExpiringTypesTTL != 90*day || c.retentionInterval != time.Hour || !c.accessLog ||
-		c.clientIPHeader != "X-Forwarded-For" || c.poolSizeSet || c.poolSize() != 36 {
+		c.clientIPHeader != "X-Forwarded-For" || c.poolSizeSet || c.poolSize() != 36 ||
+		c.newAccountsPerAddr != 10 || c.unlockAttemptsPerHour != 10 || c.maxDevicesPerAccount != 50 ||
+		c.maxChainsPerAccount != 50 || c.maxAccounts != 0 || c.retention.RemovedDeviceTTL != 90*day {
 		t.Fatalf("defaults: %+v", c)
 	}
 	if _, err := loadConfig(env(nil)); err == nil {

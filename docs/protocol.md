@@ -1,31 +1,128 @@
 # How the server works
 
 This page explains what the sync server expects from clients and what it keeps.
-It is for people working on Alerse's (formerly Arcomium's) sync client or running a server.
+It is for people working on Alerse's sync client or running a server. The
+server speaks only `/v3`: accounts with the 24 words and a password, a key per
+device, and the chains of each account ([History](#history) lists what was
+removed).
 
-## Sync chains and tokens
+## Accounts and device tokens
 
-A sync chain is a set of devices that share data. It has no account: every
-device derives the same Ed25519 key pair from the chain's sync code, and the
-public key identifies the chain. The server stores the chain under
-`hex(SHA-256(public key))`.
+An account is a user's set of devices and the chains they sync. Each device
+signs its requests with an Ed25519 key of its own, so the server can list
+devices and refuse a removed one. The server keeps the account key only in an
+envelope it cannot open. `internal/account` implements it; the design is
+ADR-0002 of Alerse. This server offers one scheme, `sk-v1`: the 24 words and a
+password, no email.
 
-Every request carries `Authorization: Bearer <token>`:
+**What the client derives** (scheme `sk-v1`). HKDF-SHA256 takes no salt and
+gives 32 bytes; the password is UTF-8 in Unicode NFC.
 
 ```text
-token     = base64url, no padding (0x01 | public key | issued at | signature)
-issued at = Unix time in milliseconds, 8 bytes big-endian
-signature = Ed25519(private key, "arcomium-sync-token-v1" | public key | issued at)
+sk      = the 256 bits the 24 words encode
+id      = hex(HKDF-SHA256(sk, info "alerse-sk-id"))      names the envelope
+salt    = 32 random bytes, chosen by the client when it creates the account
+pwkey   = scrypt(password, salt, N, r, p, 32 bytes)
+master  = HKDF-SHA256(pwkey | HKDF-SHA256(sk, info "alerse-sk-mix"), info "alerse-sk-v1")
+auth    = HKDF-SHA256(master, info "alerse-sk-auth")     sent to the server
+wrap    = HKDF-SHA256(master, info "alerse-sk-wrap")     never leaves the device
+wrapped = 0x01 | nonce (12) | AES-256-GCM(wrap, nonce, account key, aad "alerse-sk-v1" | id)
 ```
 
-The server accepts a token from 24 hours before to 5 minutes after its own
-clock. It keeps no session state, so a client can issue a new token for every
-request. A bad or expired token gets HTTP 401, which makes Chromium ask for a
-new one. `internal/auth` implements this.
+The KDF is scrypt with N = 2^17, r = 8, p = 1 by default, and the server refuses N below 2^15 or more than 1 GiB. Clients
+refuse parameters below their own as well. Without the words nobody can name
+the envelope or test a password offline; without the password the words open
+nothing. The account key is 32 random bytes made on the first device; the
+account's chains derive from it (Alerse ADR-0001 and ADR-0002).
+`e2e/accounts_test.go` derives all of this as a client does.
+
+**Device tokens.** Every authenticated `/v3` request carries
+`Authorization: Bearer <token>`:
+
+```text
+token     = base64url, no padding (0x02 | account (32) | device public key (32) | issued at (8) | signature (64))
+issued at = Unix time in milliseconds, 8 bytes big-endian
+signature = Ed25519(device key, "alerse-sync-device-token-v1" | account | public key | issued at)
+```
+
+`account` is the account ID the server handed out, as 32 bytes. The server
+accepts a token from 24 hours before to 5 minutes after its own clock and keeps
+no session state, so a client can issue a new token for every request. On every
+request it checks that the key is an active device of the account, so a removed
+device is refused from its next request on. A bad or expired token gets HTTP
+401, which makes Chromium ask for a new one. `internal/auth` implements this.
+
+**Requests.** Bodies are JSON; byte strings are standard base64. IDs are 64
+lowercase hex digits; a device's ID is its public key in hex.
+
+| Request | Auth | Body | Answer |
+|---|---|---|---|
+| `POST /v3/unlock/params` | none | `{"id"}` | `{"scheme","salt","kdf":{"name":"scrypt","n","r","p"}}` |
+| `POST /v3/account` | none | `{"id","scheme","salt","kdf","auth","wrapped","device":{"public_key","name"}}` | 201 `{"account"}`; 409 if the words have an account |
+| `POST /v3/unlock` | none | `{"id","auth","device":{"public_key","name"}}` | `{"account","wrapped"}`; 401 `wrong words or password`; 409 for a removed key or too many devices |
+| `GET /v3/account` | device | | `{"account","kind","created"}` |
+| `DELETE /v3/account` | device | `{"auth"}` | 204 |
+| `GET /v3/devices` | device | | `{"devices":[{"id","name","created","last_seen","current"}]}` |
+| `DELETE /v3/devices/{id}` | device | `{"auth"}` | 204; 404; 409 for the account's only device |
+| `POST /v3/chains/{chain}/command/` | device | protocol | [The sync protocol](#the-sync-protocol) |
+| `GET /v3/chains/{chain}/events` | device | | [Events](#events) |
+
+- **Create** makes the account with its first device. **Unlock** adds the
+  device that sends it, or renames it if it is in the account already. A
+  device name is 1 to 64 characters without control characters.
+- **Removing a device or the account** takes `auth` again, so a stolen device
+  that is still signed in cannot lock its owner out. A device may remove
+  itself while another one is left; the last one goes only with the account.
+  A removed key never joins the account again: the client makes a new key.
+- **Deleting the account** removes its envelope, devices and chains with all
+  their data, as ClearServerData does for one chain. The chains' event streams
+  get `changed`, and the devices' next requests get 401.
+
+**An account's chains.** A Space's sync URL is
+`https://<server>/v3/chains/<chain>`; Chromium adds `/command/` and the events
+client `/events`. `chain` is the chain ID: hex(SHA-256) of the chain's public
+key, which derives from the account key. A chain becomes the
+account's the first time one of its devices uses it, and stays the account's
+after a ClearServerData. These get 403:
+
+- a chain of another account;
+- an existing chain of no account, so an account's chains always start empty;
+- a chain over `MAX_CHAINS_PER_ACCOUNT`.
+
+**No enumeration.** For an `id` without an account, params answers the
+default KDF and a salt made up with HMAC-SHA256 under a server secret, and
+unlock does the same Argon2id work before its 401. Create
+answers 409 for an `id` in use, which tells nothing: only whoever holds the
+words can derive the `id`.
+
+**Rate limits.** Over a limit the answer is 429 with `Retry-After`:
+
+| Limit | Counts |
+|---|---|
+| `NEW_ACCOUNTS_PER_IP_PER_DAY` (10) | Creates per client address |
+| `UNLOCK_LOOKUPS_PER_IP_PER_HOUR` (120) | Params per client address |
+| `UNLOCK_ATTEMPTS_PER_HOUR` (10) | Password checks per envelope: unlocks, and `auth` on removals. The right password counts too |
+| `UNLOCK_ATTEMPTS_PER_IP_PER_HOUR` (30) | Password checks per client address |
+| `ACCOUNT_CHANGES_PER_HOUR` (120) | Account and device requests per account |
+
+`MAX_ACCOUNTS` answers 503 to a create when the server is full,
+`MAX_DEVICES_PER_ACCOUNT` 409 to an unlock with a new key.
+
+**What the server learns:** the envelope id, the client's salt and KDF
+parameters, Argon2id of `auth` (19 MiB, 2 passes, a random salt of its own),
+the wrapped account key, the devices' public keys and names, when each was
+created and last seen (to 5 minutes), and which chains are one account. It
+never learns the words, the password or the account key. A copy of the
+database alone allows no password guessing: each guess needs the words too.
+
+**Not built yet:** email accounts (`email-v1`) and their recovery code
+(`rk-v1`), pairing a new device with a short code (`/v3/pair`), changing the
+password or the keys. The event stream of a removed device stays open until it reconnects; it
+carries only data type numbers.
 
 ## The sync protocol
 
-`POST /v2/command/` takes a `ClientToServerMessage` and answers with a
+`POST /v3/chains/{chain}/command/` takes a `ClientToServerMessage` and answers with a
 `ClientToServerResponse`, the messages of Chromium's
 `components/sync/protocol/sync.proto`. Request and response bodies may be
 gzip-compressed. The server handles three requests:
@@ -121,146 +218,10 @@ Deletions are always accepted. The limits on requests:
 A client address is the connection's, or the one `TRUSTED_PROXY` proxies name
 in `CLIENT_IP_HEADER`. IPv6 clients count by their /64.
 
-## Sign-in with a login name and password
-
-A chain may also have one sign-in, so that a new device can join with a login
-name (an email address or any other name) and a password instead of the 24
-words. It is optional, and the words keep working. The server stays
-zero-knowledge: it never sees the login name, the password or the chain's
-secret, only values derived from them on the device. `internal/login`
-implements the server side.
-
-**What the client derives** (scheme `pw-v1`):
-
-```text
-login  = the login name, without surrounding spaces, ASCII letters in lower case
-id     = hex(SHA-256("arcomium-sync-login-id-v1" | 0x00 | login))
-salt   = 32 random bytes, chosen by the client when it sets the sign-in
-master = scrypt(password, "arcomium-sync-login-v1" | 0x00 | id | salt, N, r, p, 32 bytes)
-auth   = HKDF-SHA256(master, info "arcomium-sync-login-auth"), 32 bytes
-enc    = HKDF-SHA256(master, info "arcomium-sync-login-enc"), 32 bytes
-secret = 0x01 | nonce (12) | AES-256-GCM(enc, nonce, chain secret, aad "arcomium-sync-login-v1" | id)
-```
-
-scrypt with N = 2^17, r = 8, p = 1 (128 MiB) is the default. Argon2id would
-be the first choice, but Chromium's tree has no Argon2, and scrypt is in its
-BoringSSL. The server sends `auth` to prove the password and never gets
-`enc`, which alone opens the secret.
-
-**Requests.** Bodies are JSON; byte strings are standard base64.
-
-| Request | Auth | Body | Answer |
-|---|---|---|---|
-| `POST /v2/login/params` | none | `{"id"}` | `{"scheme","salt","kdf":{"name":"scrypt","n","r","p"}}` |
-| `POST /v2/login/unlock` | none | `{"id","auth"}` | `{"secret"}`, or 401 `wrong login or password` |
-| `GET /v2/login` | token | | `{"id","scheme","kdf","updated"}`, or 404 when the chain has none |
-| `PUT /v2/login` | token | `{"id","scheme","salt","kdf","auth","secret"}` | 204; 409 when another chain has the login |
-| `DELETE /v2/login` | token | | 204 |
-
-`PUT` sets the chain's sign-in, replacing its earlier one: a new password or a
-new login name. It only wraps the same chain secret again; the chain's data
-stays as it is. If no device has synced yet, `PUT` creates the chain, under the
-limits of a first GetUpdates. A chain's sign-in goes when the chain goes:
-ClearServerData and the retention job remove it too.
-
-**What the server stores** (`logins`): the id, the chain, the scheme, the
-client's salt and KDF parameters, the wrapped secret, and
-Argon2id(`auth`, a random salt of its own; 19 MiB, 2 passes) rather than
-`auth` or a fast hash of it, so a copy of the database alone does not give a
-cheap way to test passwords. Unlock compares in constant time.
-
-**No enumeration.** For an id without a sign-in, params answers with the
-default KDF and a salt made up as HMAC-SHA256 of the id under a random server
-secret (kept in `server_secrets`, so every instance and restart answers the
-same), and unlock does the same Argon2id work before answering 401. One gap
-stays: `PUT` with a login another chain has answers 409, so whoever runs a
-chain can learn that a login name is in use, at `LOGIN_CHANGES_PER_HOUR`.
-
-**Rate limits.** Unlock attempts are limited per id (`LOGIN_ATTEMPTS_PER_HOUR`,
-10) and per client address (`LOGIN_ATTEMPTS_PER_IP_PER_HOUR`, 30), params per
-address (`LOGIN_LOOKUPS_PER_IP_PER_HOUR`, 120), and changes per chain
-(`LOGIN_CHANGES_PER_HOUR`, 30). Over a limit the answer is 429 with
-`Retry-After`. The per-id limit holds even for the right password, so someone
-who guesses at a login name can lock its owner out for an hour; the owner
-still has the words. Limits are per instance, like the others.
-
-**What it does not protect against.** The operator of the server, or anyone
-with its database, can test passwords offline: each guess costs one scrypt of
-128 MiB and an Argon2id. A long password is the only defence, so clients ask
-for at least 15 characters (NIST SP 800-63B-4) and refuse the most common
-ones. A server that sends weak KDF parameters could make a joining client
-send an `auth` that is cheap to attack, so clients refuse parameters below
-their own minimum. The sync code itself, 256 random bits, cannot be guessed.
-
-Login names are not verified: nobody checks that an email address belongs to
-whoever uses it, and the first chain to set a login name has it. On a public
-server, email addresses should be verified before they can be claimed; that
-comes with mail, which does not exist yet. Mailing a chain's sync code to the
-user was rejected: mail is a weak channel, and sending it from the server would
-hand the code to the server. Clients offer a printable recovery sheet instead.
-
-Later schemes, such as OPAQUE (RFC 9807), which would also hide `auth` from
-the server, can be added next to `pw-v1`: every record names its scheme. A
-second factor (TOTP) is planned for a public server, not built.
-
-## Pairing a new device
-
-A device of a chain can hand the chain's secret to a new device through the
-server, with a short one-time code that the user reads on one screen and types
-on the other. The server only relays; `internal/pairing` implements it.
-
-**What the devices do** (scheme `pair-v1`):
-
-```text
-code    = 12 characters of Crockford base32 (0-9, A-Z without I, L, O, U),
-          shown XXXX-XXXX-XXXX; O reads as 0, I and L as 1
-slot    = hex(SHA-256("arcomium-pair-slot-v1" | 0x00 | first 4 characters))
-SPAKE2  = BoringSSL's SPAKE2 (Curve25519), the existing device as Alice with
-          name "arcomium-pair-existing", the new one as Bob with name
-          "arcomium-pair-new", password
-          "arcomium-pair-v1" | 0x00 | slot | 0x00 | last 8 characters (40 bits)
-keys    = HKDF-SHA256(SPAKE2 key, info "arcomium-pair-confirm", "arcomium-pair-box",
-          "arcomium-pair-verify"), 32 bytes each
-confirm = HMAC-SHA256(confirm key, "arcomium-pair-new-device" | 0x00 | device name)
-number  = first 4 bytes of the verify key, big-endian, mod 10000: shown on both
-box     = 0x01 | nonce (12) | AES-256-GCM(box key, chain secret, aad "arcomium-pair-v1" | slot)
-```
-
-1. The existing device (A) opens a slot with its SPAKE2 message.
-2. The new device (B) reads the slot, finishes SPAKE2, and joins with its own
-   message, its name and `confirm`.
-3. A finishes SPAKE2 and checks `confirm`. A wrong code fails here; A closes the
-   slot. Otherwise both show `number`, and A asks the user to allow B by name.
-4. On Allow, A approves with `box`; B reads it and opens it.
-
-**Requests.** Bodies are JSON; byte strings are standard base64.
-
-| Request | Auth | Body | Answer |
-|---|---|---|---|
-| `POST /v2/pair` | token | `{"slot","msg"}` | 204; 409 if the slot is in use |
-| `GET /v2/pair/{slot}` | none | | `{"msg","joined","bmsg","name","confirm","box","expires"}`, or 404 |
-| `POST /v2/pair/{slot}/join` | none | `{"msg","name","confirm"}` | 204; 409 if someone joined already |
-| `POST /v2/pair/{slot}/approve` | token, the slot's chain | `{"box"}` | 204; 409 before a join or after an approval |
-| `DELETE /v2/pair/{slot}` | token, the slot's chain | | 204 |
-
-A slot lives 5 minutes (`expires` counts the seconds left), takes one join and
-one approval, and goes with its chain. Opening is limited per chain
-(`PAIR_CODES_PER_HOUR`, 20), joins and reads per client address
-(`PAIR_JOINS_PER_IP_PER_HOUR`, 30; `PAIR_READS_PER_IP_PER_HOUR`, 1200; devices
-poll every 2 seconds).
-
-**What the server learns:** the slot id, the two SPAKE2 messages, the new
-device's name, `confirm` and the encrypted secret. SPAKE2 messages allow no
-offline guessing of the password, so the server, or anyone who reads the slot,
-can only try one code online by joining first; that fails `confirm`, A closes
-the slot, and the user makes a new code. A relay that answered both sides with
-its own messages would need the code too, and the number on both screens shows
-it.
-
 ## Events
 
-`GET /v2/events?cache_guid=<the device's cache GUID>` opens a Server-Sent Events
-stream:
+`GET /v3/chains/{chain}/events?cache_guid=<the device's cache GUID>` opens a
+Server-Sent Events stream:
 
 | Event | Data | What the client does |
 |---|---|---|
@@ -285,9 +246,11 @@ next poll, which the server sets to once an hour.
 | `chain_types` | Per chain and data type: highest version, highest removed tombstone, live entities, tombstones, size |
 | `chain_count` | The number of chains, kept by a trigger |
 | `entities` | Each entity as the client committed it, with its server ID, version and the time it was written |
-| `logins` | A chain's optional sign-in: a hash of the login name, the client's salt and KDF parameters, an Argon2id hash of the authentication key, the chain secret encrypted on the device |
 | `server_secrets` | Random values shared by all instances, such as the key for made-up salts |
-| `pair_slots` | Pairings in progress, for 5 minutes: the slot id, the chain, the SPAKE2 messages, the new device's name and confirmation, the encrypted secret |
+| `accounts` | Account ID (random), kind (`sk`), when it was created |
+| `envelopes` | Per account and scheme: the envelope id, the client's salt and KDF parameters, an Argon2id hash of the authentication key, the account key encrypted on the device |
+| `devices` | Per account: each device's public key and name, when it was created, last seen and removed |
+| `account_chains` | Which account claimed a chain. It outlives the chain, so a chain cleared and created again stays the account's |
 
 **Encryption.** With a sync passphrase, Chromium encrypts every data type with a
 key derived from the passphrase. The server then stores only ciphertext, plus
@@ -311,6 +274,16 @@ since downloads the data type again, as described under
 | History and history delete directives | `HISTORY_TTL`, 90 days since they were last written | Chromium keeps 90 days of history and sends nothing when a visit expires: Google's server expires history itself, and so does this one. A directive outlives the history it deletes |
 | Chains no device committed to | `EMPTY_CHAIN_TTL`, 7 days | Every Chromium device commits its device info right away; a chain with only its permanent entities was never used |
 | Chains no device talked to | `INACTIVE_CHAIN_TTL`, off by default | Abandoned chains on a public server |
+| Records of removed devices | `REMOVED_DEVICE_TTL`, 90 days | Until then the removed key cannot join the account again |
 
 Removing data takes the chain's lock, one chain at a time, so it never races a
 commit. With several instances, one runs the job at a time.
+
+## History
+
+Releases up to 0.1.5 also served chains without accounts: every device of a
+chain derived its key from the 24 words alone (`/v2/command/`, `/v2/events`),
+with an optional login name and password (`/v2/login`, `pw-v1`) and pairing by
+short code (`/v2/pair`, `pair-v1`). 0.2.0 removed all of it: old clients get
+404, and the migration to 0.2.0 drops the sign-ins, the pairing slots and every
+chain no account owns. Sync starts over on `/v3`.

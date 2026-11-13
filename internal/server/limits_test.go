@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"io"
@@ -18,7 +17,6 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"github.com/VizzleTF/arcomium-sync/internal/auth"
 	"github.com/VizzleTF/arcomium-sync/internal/metrics"
 	"github.com/VizzleTF/arcomium-sync/internal/protocol"
 	"github.com/VizzleTF/arcomium-sync/internal/ratelimit"
@@ -27,31 +25,27 @@ import (
 	pb "github.com/VizzleTF/arcomium-sync/internal/syncpb"
 )
 
-func newToken(t *testing.T) string {
-	t.Helper()
-	_, key, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return auth.NewToken(key, time.Now())
-}
-
 func baseConfig(st store.Store) Config {
-	return Config{
+	c := Config{
 		Service: protocol.New(st, nil, protocol.DefaultLimits),
 		Events:  http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "stream") }),
 		Health:  func(context.Context) error { return nil },
 		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	if as, ok := st.(store.AccountStore); ok {
+		c.Accounts = accountsFor(as)
+	}
+	return c
 }
 
 func TestSlowBodyDoesNotHoldSlots(t *testing.T) {
-	c := baseConfig(memory.New())
+	st := memory.New()
+	c := baseConfig(st)
 	c.MaxConcurrent = 1
 	c.BodyTimeout = 500 * time.Millisecond
 	srv := httptest.NewServer(Handler(c))
 	defer srv.Close()
-	token := newToken(t)
+	cmd, _, token := testChain(t, st)
 
 	// A client sends its headers and then nothing.
 	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
@@ -59,12 +53,12 @@ func TestSlowBodyDoesNotHoldSlots(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	fmt.Fprintf(conn, "POST /v2/command/ HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\nContent-Length: 100\r\n\r\n", token)
+	fmt.Fprintf(conn, "POST %s/ HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\nContent-Length: 100\r\n\r\n", cmd, token)
 	time.Sleep(100 * time.Millisecond)
 
 	// The only slot is free for others meanwhile.
 	start := time.Now()
-	resp, err := http.Post(srv.URL+"/v2/command/", "application/octet-stream", bytes.NewReader(getUpdates(t)))
+	resp, err := http.Post(srv.URL+cmd+"/", "application/octet-stream", bytes.NewReader(getUpdates(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +66,7 @@ func TestSlowBodyDoesNotHoldSlots(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusOK {
 		t.Fatalf("other request: HTTP %d", resp.StatusCode)
 	}
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/command/", bytes.NewReader(getUpdates(t)))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+cmd+"/", bytes.NewReader(getUpdates(t)))
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
@@ -92,21 +86,23 @@ func TestSlowBodyDoesNotHoldSlots(t *testing.T) {
 }
 
 func TestAddrLimit(t *testing.T) {
-	c := baseConfig(memory.New())
+	st := memory.New()
+	c := baseConfig(st)
 	c.AddrLimiter = ratelimit.New(1)
 	h := Handler(c)
-	token := newToken(t)
-	req := request{path: "/v2/command/", body: getUpdates(t), token: token}
+	cmd, eventsPath, token := testChain(t, st)
+	req := request{path: cmd + "/", body: getUpdates(t), token: token}
 	if rsp := response(t, do(h, req)); rsp.GetErrorCode() != pb.SyncEnums_SUCCESS {
 		t.Fatalf("first request: %v", rsp.GetErrorCode())
 	}
 	// Another chain from the same address.
-	req.token = newToken(t)
+	otherCmd, _, otherToken := testChain(t, st)
+	req.path, req.token = otherCmd+"/", otherToken
 	if rsp := response(t, do(h, req)); rsp.GetErrorCode() != pb.SyncEnums_THROTTLED {
 		t.Fatalf("second request: %v, want THROTTLED", rsp.GetErrorCode())
 	}
 	rec := httptest.NewRecorder()
-	events := httptest.NewRequest(http.MethodGet, "/v2/events", nil)
+	events := httptest.NewRequest(http.MethodGet, eventsPath, nil)
 	events.Header.Set("Authorization", "Bearer "+token)
 	h.ServeHTTP(rec, events)
 	if rec.Code != http.StatusTooManyRequests {
@@ -122,10 +118,10 @@ func TestEventsNeedAChain(t *testing.T) {
 		return ok, err
 	}
 	h := Handler(c)
-	token := newToken(t)
+	cmd, eventsPath, token := testChain(t, st)
 	stream := func() int {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/v2/events?cache_guid=g", nil)
+		req := httptest.NewRequest(http.MethodGet, eventsPath+"?cache_guid=g", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		h.ServeHTTP(rec, req)
 		return rec.Code
@@ -133,7 +129,7 @@ func TestEventsNeedAChain(t *testing.T) {
 	if got := stream(); got != http.StatusNotFound {
 		t.Fatalf("stream before the first GetUpdates: HTTP %d, want 404", got)
 	}
-	do(h, request{path: "/v2/command/", body: getUpdates(t), token: token})
+	do(h, request{path: cmd + "/", body: getUpdates(t), token: token})
 	if got := stream(); got != http.StatusOK {
 		t.Fatalf("stream of an existing chain: HTTP %d", got)
 	}
@@ -179,11 +175,13 @@ func (s cancelCheckingStore) Create(ctx context.Context, chainID string, maxChai
 }
 
 func TestWorkOutlivesTheClient(t *testing.T) {
-	h := Handler(baseConfig(cancelCheckingStore{memory.New()}))
+	st := cancelCheckingStore{memory.New()}
+	h := Handler(baseConfig(st))
+	cmd, _, token := testChain(t, st)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v2/command/", bytes.NewReader(getUpdates(t)))
-	req.Header.Set("Authorization", "Bearer "+newToken(t))
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, cmd+"/", bytes.NewReader(getUpdates(t)))
+	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rsp := response(t, rec); rsp.GetErrorCode() != pb.SyncEnums_SUCCESS {
@@ -193,13 +191,14 @@ func TestWorkOutlivesTheClient(t *testing.T) {
 
 func TestAccessLogAndMetrics(t *testing.T) {
 	var logs bytes.Buffer
-	c := baseConfig(memory.New())
+	st := memory.New()
+	c := baseConfig(st)
 	c.Log = slog.New(slog.NewJSONHandler(&logs, nil))
 	c.AccessLog = true
 	c.Metrics = metrics.New()
 	h := Handler(c)
-	token := newToken(t)
-	do(h, request{path: "/v2/command/?client_id=secret-query", body: getUpdates(t), token: token})
+	cmd, _, token := testChain(t, st)
+	do(h, request{path: cmd + "/?client_id=secret-query", body: getUpdates(t), token: token})
 
 	// A commit whose content must not reach the log.
 	commit, _ := proto.Marshal(&pb.ClientToServerMessage{
@@ -209,7 +208,7 @@ func TestAccessLogAndMetrics(t *testing.T) {
 			IdString: proto.String("c1"), NonUniqueName: proto.String("secret-title"),
 		}}},
 	})
-	do(h, request{path: "/v2/command/", body: commit, token: token})
+	do(h, request{path: cmd + "/", body: commit, token: token})
 
 	out := logs.String()
 	for _, secret := range []string{"secret-title", "secret-query", token} {

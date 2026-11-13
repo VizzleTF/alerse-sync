@@ -20,8 +20,6 @@ type chain struct {
 	state    store.Chain
 	created  time.Time
 	entities map[string]entry
-	// login is the chain's sign-in, if any; it goes with the chain.
-	login *store.Login
 }
 
 // Store keeps chains in memory. Its zero value is not usable; call New.
@@ -32,7 +30,9 @@ type Store struct {
 	mu      sync.Mutex
 	chains  map[string]*chain
 	secrets map[string][]byte
-	slots   map[string]*store.PairSlot
+	// accounts and claims (chain ID to account ID) are set up on first use.
+	accounts map[string]*account
+	claims   map[string]string
 }
 
 // New returns an empty store.
@@ -195,6 +195,9 @@ func (s *Store) Collect(_ context.Context, r store.Retention) (store.Collected, 
 			c.state.Types[e.DataType] = state
 			done.Tombstones++
 		}
+	}
+	if r.RemovedDeviceTTL > 0 {
+		done.RemovedDevices = s.collectDevices(r.Now.Add(-r.RemovedDeviceTTL))
 	}
 	return done, nil
 }
