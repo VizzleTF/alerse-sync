@@ -27,9 +27,9 @@ in the alerse-sync repository; say in its title that it is a privacy request.
 | Account: an ID derived from your 24 words, a salt and key-derivation settings, an Argon2id hash of a key derived from your password, your account key encrypted on your device | to let your devices sign in | contract (GDPR Art. 6(1)(b)) | until you delete the account |
 | Devices: each device's public key, its name (your computer's name, such as "Anna's MacBook"), when it was added and last seen (to 5 minutes) | to show your devices and let you remove one | contract | until removed; then 90 days, so a removed key cannot rejoin |
 | Synced data: bookmarks, open tabs, Spaces, passwords, history, settings, encrypted on your device; the server sees only its size, data type and timestamps | the service itself | contract | until you delete it or the account. Deleted items: 60 days. History: 90 days. A Space no device has contacted for a year is removed |
-| IP address, approximate location (country, region, city from the IP), time, requested path, status and size of each request | to run the service and to block abuse | legitimate interest in security (Art. 6(1)(f)) | about 7 days in the access log of the server's front proxy |
+| IP address, approximate location (country, region, city from the IP), time, requested path, status and size of each request | to run the service and to block abuse | legitimate interest in security (Art. 6(1)(f)) | 1 day in the access log of the server's front proxy, deleted hourly, so at most about 25 hours. The proxy adds the location itself and cannot be told not to |
 | IP address of a client the server shuts out for sending refused requests | to block abuse | legitimate interest | 7 days in the server's logs |
-| IP addresses of failed TLS connections | to diagnose and stop attacks | legitimate interest | in the proxy's error log and the security monitoring that collects it, until they rotate |
+| IP addresses of failed TLS connections | to diagnose and stop attacks | legitimate interest | in the proxy's error log, which keeps its last 1 MB: a few days |
 | Counters of requests, without IP addresses or accounts | to run the service | legitimate interest | 30 days |
 
 Backups of the database are taken daily and kept 7 days, so deleted data leaves the
@@ -56,7 +56,7 @@ Other parties see only this:
 - **Access, correction, portability, restriction and objection**: ask through the
   contact above. Synced data is encrypted with keys only your devices hold, so your
   devices already have it in readable form; the server can give you the account and
-  device records and the log lines with your IP address.
+  device records, and the log lines with your IP address while they are still kept.
 - **Complain** to the data protection authority of your country
   ([list of EU authorities](https://www.edpb.europa.eu/about-edpb/about-edpb/members_en)).
 
