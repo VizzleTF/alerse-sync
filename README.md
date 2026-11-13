@@ -79,6 +79,7 @@ or duration of `0` turns it off.
 | `ACCESS_LOG` | `true` | Log every request: method, path, status, time, sizes, a shortened chain ID. Never bodies, query strings, tokens or IP addresses |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`; logs are JSON on stderr |
 | `SHUTDOWN_DELAY` | `0` | How long to fail `/readyz` before stopping on SIGTERM, so a load balancer stops sending requests first |
+| `SESSIONS_NUDGE_DELAY` | `3s` | How long a device waits before it sends a change to its open tabs; `0` leaves Chromium's 15 seconds |
 
 **What a sync chain may store**
 

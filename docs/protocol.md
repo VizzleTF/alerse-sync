@@ -102,6 +102,12 @@ types conflict, except a deleted entity created again from version 0.
 | `MAX_HISTORY_ENTITIES` or `MAX_HISTORY_BYTES` of history and history delete directives | `SUCCESS`: the oldest visits are dropped, a hundredth more than needed. Clients expire history on their own, so nothing tells them |
 | `REQUIRE_CUSTOM_PASSPHRASE`, data of a type Chromium can encrypt while the chain's Nigori node is not in `CUSTOM_PASSPHRASE`, or such data unencrypted | `TRANSIENT_ERROR`: Chromium keeps the entity and commits it again later. Deletions, the Nigori node and never-encrypted types such as device info pass |
 
+**Commit delays.** Chromium waits before it commits a local change, to merge a
+burst of them: 2 seconds for bookmarks, 15 for open tabs. Every response tells
+clients to wait `SESSIONS_NUDGE_DELAY` (3 seconds) for open tabs instead
+(`client_command.custom_nudge_delays`, which Chromium applies as is), so a tab
+reaches the other devices about 3 to 4 seconds after it opened.
+
 Deletions are always accepted. The limits on requests:
 
 | Limit | Answer |

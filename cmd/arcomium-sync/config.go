@@ -161,6 +161,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	duration("RETENTION_INTERVAL", &c.retentionInterval, time.Hour)
 	boolean("ACCESS_LOG", &c.accessLog, true)
 	duration("SHUTDOWN_DELAY", &c.shutdownDelay, 0)
+	duration("SESSIONS_NUDGE_DELAY", &c.limits.SessionsNudgeDelay, protocol.DefaultLimits.SessionsNudgeDelay)
 
 	if s, ok := env("TRUSTED_PROXY"); ok {
 		prefixes, err := clientip.ParsePrefixes(s)

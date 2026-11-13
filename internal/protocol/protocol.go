@@ -46,6 +46,9 @@ type Limits struct {
 	PollInterval time.Duration
 	// CommitBatchSize is the number of entities a client puts in a commit.
 	CommitBatchSize int
+	// SessionsNudgeDelay is how long a client waits before it commits a
+	// change to its open tabs; 0 leaves Chromium's 15 seconds.
+	SessionsNudgeDelay time.Duration
 	// RequireCustomPassphrase refuses data a client could encrypt until the
 	// chain's Nigori node says it is encrypted with a custom passphrase, and
 	// unencrypted data of such types after that.
@@ -64,6 +67,7 @@ var DefaultLimits = Limits{
 	MaxUpdateBytes:     16 << 20,
 	PollInterval:       time.Hour,
 	CommitBatchSize:    100,
+	SessionsNudgeDelay: 3 * time.Second,
 }
 
 // Notifier tells a chain's other devices which data types changed.
@@ -132,6 +136,14 @@ func (s *Service) Handle(ctx context.Context, chainID string, msg *pb.ClientToSe
 			SetSyncPollInterval: proto.Int32(int32(s.limits.PollInterval / time.Second)),
 			MaxCommitBatchSize:  proto.Int32(int32(s.limits.CommitBatchSize)),
 		},
+	}
+	if d := s.limits.SessionsNudgeDelay; d > 0 {
+		// Open tabs reach the other devices in seconds: Chromium waits 15 s
+		// to merge a page load's commits, and applies the server's delay as is.
+		rsp.ClientCommand.CustomNudgeDelays = []*pb.CustomNudgeDelay{{
+			DatatypeId: proto.Int32(sessionType),
+			DelayMs:    proto.Int32(int32(d / time.Millisecond)),
+		}}
 	}
 
 	var err error

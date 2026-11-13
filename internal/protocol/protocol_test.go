@@ -3,8 +3,10 @@ package protocol
 import (
 	"bytes"
 	"context"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
@@ -569,5 +571,25 @@ func TestMaxChains(t *testing.T) {
 	})
 	if err != nil || rsp.GetErrorCode() != pb.SyncEnums_TRANSIENT_ERROR {
 		t.Fatalf("second chain: %v, %v", rsp.GetErrorCode(), err)
+	}
+}
+
+func TestSessionsNudgeDelay(t *testing.T) {
+	for _, test := range []struct {
+		delay time.Duration
+		want  []int32 // datatype, delay in ms
+	}{
+		{3 * time.Second, []int32{sessionType, 3000}},
+		{0, nil},
+	} {
+		s, _ := newService(t, func(l *Limits) { l.SessionsNudgeDelay = test.delay })
+		rsp := newDevice(t, s, "a").fetch(bookmarkType)
+		var got []int32
+		for _, d := range rsp.GetClientCommand().GetCustomNudgeDelays() {
+			got = append(got, d.GetDatatypeId(), d.GetDelayMs())
+		}
+		if !slices.Equal(got, test.want) {
+			t.Errorf("delay %v: custom nudge delays %v, want %v", test.delay, got, test.want)
+		}
 	}
 }
