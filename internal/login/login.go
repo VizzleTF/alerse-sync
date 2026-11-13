@@ -18,20 +18,16 @@ package login
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
-	"sync"
 	"time"
 
-	"golang.org/x/crypto/argon2"
-
 	"github.com/VizzleTF/arcomium-sync/internal/auth"
+	"github.com/VizzleTF/arcomium-sync/internal/credential"
 	"github.com/VizzleTF/arcomium-sync/internal/jsonapi"
 	"github.com/VizzleTF/arcomium-sync/internal/metrics"
 	"github.com/VizzleTF/arcomium-sync/internal/protocol"
@@ -46,32 +42,17 @@ import (
 const Scheme = "pw-v1"
 
 // KDF is the client's key derivation, with its parameters.
-type KDF struct {
-	Name string `json:"name"`
-	N    int64  `json:"n"`
-	R    int64  `json:"r"`
-	P    int64  `json:"p"`
-}
+type KDF = credential.KDF
 
 // DefaultKDF is what the server answers for login names without a login,
 // and what clients use today: scrypt with 128 MiB.
-var DefaultKDF = KDF{Name: "scrypt", N: 1 << 17, R: 8, P: 1}
-
-// valid accepts scrypt with at least 32 MiB and at most 1 GiB of memory.
-func (k KDF) valid() bool {
-	return k.Name == "scrypt" && k.N >= 1<<15 && k.N <= 1<<20 && k.N&(k.N-1) == 0 &&
-		k.R >= 1 && k.R <= 32 && k.P >= 1 && k.P <= 16 && 128*k.R*k.N <= 1<<30
-}
+var DefaultKDF = credential.DefaultKDF
 
 // Hash is the Argon2id cost of the server's hash of authentication keys.
-type Hash struct {
-	Time    uint32
-	Memory  uint32 // KiB
-	Threads uint8
-}
+type Hash = credential.Hash
 
 // DefaultHash is OWASP's minimum for Argon2id: 19 MiB, 2 passes.
-var DefaultHash = Hash{Time: 2, Memory: 19 * 1024, Threads: 1}
+var DefaultHash = credential.DefaultHash
 
 const (
 	authSize    = 32
@@ -82,9 +63,6 @@ const (
 	// fakeSecret names the server secret that makes up salts and
 	// verifiers for login names without a login.
 	fakeSecret = "login-fake-salt" //nolint:gosec // the name of the secret, not its value
-	// hashSlots bounds the Argon2id hashes computed at once, which bounds
-	// their memory.
-	hashSlots = 4
 )
 
 // Config is what the handler needs.
@@ -100,25 +78,26 @@ type Config struct {
 	AddrAttempts *ratelimit.Limiter
 	Lookups      *ratelimit.Limiter
 	Changes      *ratelimit.Limiter
-	Hash         Hash
-	Log          *slog.Logger
-	Metrics      *metrics.Metrics
+	// Hasher hashes authentication keys; nil makes one of Hash.
+	Hasher  *credential.Hasher
+	Hash    Hash
+	Log     *slog.Logger
+	Metrics *metrics.Metrics
 }
 
 type handler struct {
 	Config
-	slots chan struct{}
-
-	fakeMu  sync.Mutex
-	fakeKey []byte // the server secret behind fake, once read
+	fakes *credential.Fakes
 }
 
 // Handler returns the login routes, under /v2/login.
 func Handler(c Config) http.Handler {
-	if c.Hash == (Hash{}) {
-		c.Hash = DefaultHash
+	if c.Hasher == nil {
+		c.Hasher = credential.NewHasher(c.Hash)
 	}
-	h := &handler{Config: c, slots: make(chan struct{}, hashSlots)}
+	h := &handler{Config: c, fakes: &credential.Fakes{Secret: func(ctx context.Context) ([]byte, error) {
+		return c.Store.ServerSecret(ctx, fakeSecret)
+	}}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v2/login/params", h.params)
 	mux.HandleFunc("POST /v2/login/unlock", h.unlock)
@@ -271,7 +250,7 @@ func (h *handler) set(w http.ResponseWriter, r *http.Request) {
 	case req.Scheme != Scheme:
 		jsonapi.Error(w, http.StatusBadRequest, "unknown scheme")
 		return
-	case !req.KDF.valid():
+	case !req.KDF.Valid():
 		jsonapi.Error(w, http.StatusBadRequest, "kdf parameters out of range")
 		return
 	case len(req.Salt) < minSaltSize || len(req.Salt) > maxSaltSize:
@@ -334,44 +313,14 @@ func (h *handler) remove(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// hash is the stored form of an authentication key: Argon2id, so that the
-// database alone does not give a cheap way to test passwords.
 func (h *handler) hash(ctx context.Context, key, salt []byte) ([]byte, error) {
-	select {
-	case h.slots <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	defer func() { <-h.slots }()
-	return argon2.IDKey(key, salt, h.Hash.Time, h.Hash.Memory, h.Hash.Threads, 32), nil
+	return h.Hasher.Sum(ctx, key, salt)
 }
 
 // fake makes up a value of kind for a login ID without a login, the same on
 // every request and instance.
 func (h *handler) fake(ctx context.Context, kind, id string) ([]byte, error) {
-	key, err := h.fakeSecretKey(ctx)
-	if err != nil {
-		return nil, err
-	}
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(kind + "\x00" + id))
-	return mac.Sum(nil), nil
-}
-
-// fakeSecretKey reads the server secret once: it never changes, and reading
-// it on every request would make a login name without a login answer slower
-// than one with a login.
-func (h *handler) fakeSecretKey(ctx context.Context) ([]byte, error) {
-	h.fakeMu.Lock()
-	defer h.fakeMu.Unlock()
-	if h.fakeKey == nil {
-		key, err := h.Store.ServerSecret(ctx, fakeSecret)
-		if err != nil {
-			return nil, err
-		}
-		h.fakeKey = key
-	}
-	return h.fakeKey, nil
+	return h.fakes.Value(ctx, kind, id)
 }
 
 func (h *handler) allow(w http.ResponseWriter, l *ratelimit.Limiter, key string) bool {
