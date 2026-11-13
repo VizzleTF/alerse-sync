@@ -59,7 +59,7 @@ func TestVerifyDeviceRejectsTampering(t *testing.T) {
 			return b
 		}, ErrSignature},
 		{"flipped signature", func(b []byte) []byte { b[len(b)-1] ^= 1; return b }, ErrSignature},
-		{"chain token version", func(b []byte) []byte { b[0] = tokenVersion; return b }, ErrMalformed},
+		{"other version", func(b []byte) []byte { b[0] = 0x01; return b }, ErrMalformed},
 		{"truncated", func(b []byte) []byte { return b[:len(b)-1] }, ErrMalformed},
 	}
 	for _, test := range tests {
@@ -70,27 +70,6 @@ func TestVerifyDeviceRejectsTampering(t *testing.T) {
 				t.Fatalf("error %v, want %v", err, test.err)
 			}
 		})
-	}
-}
-
-// A chain token is no device token and the other way round, and a signature
-// made under the chain token's context does not pass as a device token's.
-func TestTokensDoNotCross(t *testing.T) {
-	key := newKey(t)
-	now := time.Now()
-	if _, err := VerifyDevice(NewToken(key, now), now); !errors.Is(err, ErrMalformed) {
-		t.Fatalf("chain token as device token: %v", err)
-	}
-	if _, err := Verify(NewDeviceToken(key, testAccount, now), now); !errors.Is(err, ErrMalformed) {
-		t.Fatalf("device token as chain token: %v", err)
-	}
-
-	raw, _ := base64.RawURLEncoding.DecodeString(NewDeviceToken(key, testAccount, now))
-	unsigned := raw[:deviceTokenSize-ed25519.SignatureSize]
-	signed := append([]byte(signContext), unsigned[1:]...)
-	copy(raw[deviceTokenSize-ed25519.SignatureSize:], ed25519.Sign(key, signed))
-	if _, err := VerifyDevice(base64.RawURLEncoding.EncodeToString(raw), now); !errors.Is(err, ErrSignature) {
-		t.Fatalf("signature under the chain context: %v", err)
 	}
 }
 

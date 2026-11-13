@@ -11,6 +11,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,8 +32,6 @@ import (
 	"github.com/VizzleTF/arcomium-sync/internal/auth"
 	"github.com/VizzleTF/arcomium-sync/internal/credential"
 	"github.com/VizzleTF/arcomium-sync/internal/events"
-	"github.com/VizzleTF/arcomium-sync/internal/login"
-	"github.com/VizzleTF/arcomium-sync/internal/pairing"
 	"github.com/VizzleTF/arcomium-sync/internal/protocol"
 	"github.com/VizzleTF/arcomium-sync/internal/server"
 	"github.com/VizzleTF/arcomium-sync/internal/store/postgres"
@@ -41,8 +42,7 @@ import (
 const bookmarkType = 32904
 
 var (
-	serverURL string
-	// baseURL is the server's, without /v2.
+	// baseURL is the server's.
 	baseURL string
 	pool    *pgxpool.Pool
 	st      *postgres.Store
@@ -72,7 +72,6 @@ func run(m *testing.M) int {
 	defer srv.Close()
 	defer hub.Close()
 	baseURL = srv.URL
-	serverURL = srv.URL + "/v2"
 	return m.Run()
 }
 
@@ -87,13 +86,8 @@ func newInstance(ctx context.Context) (*httptest.Server, *events.Hub) {
 		Cleared: service.Cleared, Log: testLog,
 	})
 	srv := httptest.NewUnstartedServer(server.Handler(server.Config{
-		Service: service,
-		Events:  hub,
-		Login: login.Handler(login.Config{
-			Store: st, EnsureChain: service.EnsureChain, Log: testLog,
-			Hash: login.Hash{Time: 1, Memory: 1024, Threads: 1},
-		}),
-		Pair:     pairing.Handler(pairing.Config{Store: st, Log: testLog}),
+		Service:  service,
+		Events:   hub,
 		Accounts: accounts,
 		ChainExists: func(ctx context.Context, chainID string) (bool, error) {
 			_, ok, err := st.Chain(ctx, chainID)
@@ -109,37 +103,83 @@ func newInstance(ctx context.Context) (*httptest.Server, *events.Hub) {
 // device is a client of a sync chain, speaking the protocol over HTTP.
 type device struct {
 	t        *testing.T
-	key      ed25519.PrivateKey
 	guid     string
 	birthday string
 	token    []byte
-	// url is the server's, if not serverURL.
+	// url is the chain's: <server>/v3/chains/<chain>.
 	url string
-	// newToken, if set, issues the device's tokens instead of the chain key.
+	// newToken issues the device's tokens.
 	newToken func() string
 }
 
-func (d *device) bearer() string {
-	if d.newToken != nil {
-		return d.newToken()
-	}
-	return auth.NewToken(d.key, time.Now())
+func (d *device) bearer() string { return d.newToken() }
+
+func (d *device) server() string { return d.url }
+
+// testAccount is an account whose devices sync one chain over /v3. The
+// server checks nothing of the sk-v1 derivation, so random values stand in
+// for the envelope id and the authentication key.
+type testAccount struct {
+	t        *testing.T
+	id       string
+	envelope string
+	auth     []byte
+	chain    string
+	first    ed25519.PrivateKey // the creating device, until device() hands it out
 }
 
-func (d *device) server() string {
-	if d.url != "" {
-		return d.url
-	}
-	return serverURL
-}
-
-func newChain(t *testing.T) ed25519.PrivateKey {
+func randomHex(t *testing.T) string {
 	t.Helper()
-	_, key, err := ed25519.GenerateKey(nil)
-	if err != nil {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
 		t.Fatal(err)
 	}
-	return key
+	return hex.EncodeToString(raw)
+}
+
+// newAccount creates an account with one device on the shared server.
+func newAccount(t *testing.T) *testAccount {
+	t.Helper()
+	a := &testAccount{t: t, envelope: randomHex(t), auth: make([]byte, 32), chain: randomHex(t)}
+	_, _ = rand.Read(a.auth)
+	_, a.first, _ = ed25519.GenerateKey(nil)
+	status, body := v3(t, "POST", "/account", "", map[string]any{
+		"id": a.envelope, "scheme": account.SchemeSK, "salt": make([]byte, 32), "kdf": credential.DefaultKDF,
+		"auth": a.auth, "wrapped": make([]byte, 60),
+		"device": map[string]any{"public_key": publicKey(a.first), "name": "First"},
+	})
+	var created struct{ Account string }
+	if status != 201 || json.Unmarshal(body, &created) != nil {
+		t.Fatalf("create account: HTTP %d: %s", status, body)
+	}
+	a.id = created.Account
+	return a
+}
+
+// device returns a device of the account on its chain, served by server
+// (baseURL if empty). After the first, each one signs a new key in.
+func (a *testAccount) device(guid, server string) *device {
+	a.t.Helper()
+	if server == "" {
+		server = baseURL
+	}
+	key := a.first
+	if key != nil {
+		a.first = nil
+	} else {
+		_, key, _ = ed25519.GenerateKey(nil)
+		status, body := v3(a.t, "POST", "/unlock", "", map[string]any{
+			"id": a.envelope, "auth": a.auth,
+			"device": map[string]any{"public_key": publicKey(key), "name": guid},
+		})
+		if status != 200 {
+			a.t.Fatalf("unlock: HTTP %d: %s", status, body)
+		}
+	}
+	return &device{
+		t: a.t, guid: guid, url: server + "/v3/chains/" + a.chain,
+		newToken: func() string { return auth.NewDeviceToken(key, a.id, time.Now()) },
+	}
 }
 
 func (d *device) send(msg *pb.ClientToServerMessage) *pb.ClientToServerResponse {
@@ -264,9 +304,9 @@ func expectEvent(t *testing.T, lines <-chan string, want string) {
 }
 
 func TestTwoDevices(t *testing.T) {
-	key := newChain(t)
-	a := &device{t: t, key: key, guid: "a"}
-	b := &device{t: t, key: key, guid: "b"}
+	acc := newAccount(t)
+	a := acc.device("a", "")
+	b := acc.device("b", "")
 	if got := len(a.bookmarks()); got != 4 {
 		t.Fatalf("first sync: %d bookmark entities, want the 4 permanent ones", got)
 	}
@@ -298,22 +338,26 @@ func TestTwoDevices(t *testing.T) {
 	}
 
 	// Another chain sees none of it.
-	other := &device{t: t, key: newChain(t), guid: "x"}
+	other := newAccount(t).device("x", "")
 	if got := len(other.bookmarks()); got != 4 {
 		t.Fatalf("other chain: %d entities, want 4", got)
 	}
 }
 
 func TestConcurrentCommits(t *testing.T) {
-	key := newChain(t)
-	reader := &device{t: t, key: key, guid: "reader"}
+	acc := newAccount(t)
+	reader := acc.device("reader", "")
 	reader.bookmarks()
 
 	const writers, commits = 4, 25
+	devices := make([]*device, writers)
+	for w := range writers {
+		devices[w] = acc.device(fmt.Sprintf("w%d", w), "")
+	}
 	var wg sync.WaitGroup
 	for w := range writers {
 		wg.Go(func() {
-			d := &device{t: t, key: key, guid: fmt.Sprintf("w%d", w)}
+			d := devices[w]
 			d.bookmarks()
 			for c := range commits {
 				d.commit(bookmark(fmt.Sprintf("c%d", c), fmt.Sprintf("%d-%d", w, c)))
@@ -334,9 +378,9 @@ func TestConcurrentCommits(t *testing.T) {
 }
 
 func TestClearServerData(t *testing.T) {
-	key := newChain(t)
-	a := &device{t: t, key: key, guid: "a"}
-	b := &device{t: t, key: key, guid: "b"}
+	acc := newAccount(t)
+	a := acc.device("a", "")
+	b := acc.device("b", "")
 	a.bookmarks()
 	b.bookmarks()
 	a.commit(bookmark("c1", "Example"))
@@ -355,20 +399,22 @@ func TestClearServerData(t *testing.T) {
 	if stale.GetErrorCode() != pb.SyncEnums_NOT_MY_BIRTHDAY {
 		t.Fatalf("commit after clear: %v, want NOT_MY_BIRTHDAY", stale.GetErrorCode())
 	}
-	fresh := &device{t: t, key: key, guid: "c"}
+	fresh := acc.device("c", "")
 	if got := len(fresh.bookmarks()); got != 4 {
 		t.Fatalf("after clear: %d entities, want 4", got)
 	}
 }
 
 func TestRejectsBadTokens(t *testing.T) {
-	_, other, _ := ed25519.GenerateKey(nil)
+	acc := newAccount(t)
+	_, stranger, _ := ed25519.GenerateKey(nil)
 	for name, header := range map[string]string{
-		"none":    "",
-		"garbage": "Bearer abc",
-		"expired": "Bearer " + auth.NewToken(other, time.Now().Add(-48*time.Hour)),
+		"none":           "",
+		"garbage":        "Bearer abc",
+		"unknown device": "Bearer " + auth.NewDeviceToken(stranger, acc.id, time.Now()),
+		"expired":        "Bearer " + auth.NewDeviceToken(stranger, acc.id, time.Now().Add(-48*time.Hour)),
 	} {
-		req, _ := http.NewRequest(http.MethodPost, serverURL+"/command/", nil)
+		req, _ := http.NewRequest(http.MethodPost, baseURL+"/v3/chains/"+acc.chain+"/command/", nil)
 		if header != "" {
 			req.Header.Set("Authorization", header)
 		}
@@ -380,5 +426,14 @@ func TestRejectsBadTokens(t *testing.T) {
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("%s token: HTTP %d, want 401", name, resp.StatusCode)
 		}
+	}
+	// The removed scheme answers nothing.
+	resp, err := http.Post(baseURL+"/v2/command/", "application/octet-stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("/v2/command/: HTTP %d, want 404", resp.StatusCode)
 	}
 }

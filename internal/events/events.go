@@ -1,7 +1,7 @@
 // Package events tells a sync chain's devices right away when another device
 // commits, so they fetch the change instead of waiting for their next poll.
 //
-// Devices hold a Server-Sent Events stream open (GET /v2/events). A commit
+// Devices hold a Server-Sent Events stream open (GET /v3/chains/{chain}/events). A commit
 // publishes the chain, the committing device and the changed data types.
 // With Postgres the event goes through NOTIFY, so every server instance
 // behind a load balancer delivers it to the devices connected to it.
@@ -245,7 +245,7 @@ func (h *Hub) unsubscribe(chainID string, sub *subscriber) {
 //
 // The device names itself with ?cache_guid= so it is not told about its own
 // commits. A comment line every 25 seconds keeps proxies from closing the
-// stream. It needs auth.Middleware in front.
+// stream. It needs the chain in the request context (auth.WithChain).
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	chainID := auth.ChainFromContext(r.Context())
 	select {

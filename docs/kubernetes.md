@@ -88,7 +88,7 @@ curl https://sync.example.com/health
 ```
 
 `curl` prints `ok` once the server answers and reaches the database. Then set
-Alerse's sync server to `https://sync.example.com/v2`.
+Alerse's sync server to `https://sync.example.com`.
 
 ## Update
 

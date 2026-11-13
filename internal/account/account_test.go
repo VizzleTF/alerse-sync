@@ -59,9 +59,6 @@ func newEnv(t *testing.T, c Config) *env {
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, auth.ChainFromContext(r.Context()))
 		}))))
-	// A stand-in for /v2, behind a chain token.
-	mux.Handle("GET /v2/probe", auth.Middleware(e.accounts.RefuseAccountChains(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") }))))
 	e.h = (*clientip.Resolver)(nil).Middleware(mux)
 	return e
 }
@@ -109,10 +106,10 @@ func createBody(envelope string, authKey byte, device ed25519.PrivateKey) create
 	}
 }
 
-// create makes an account and returns its ID.
-func (e *env) create(envelope string, authKey byte, device ed25519.PrivateKey) string {
+// create makes an account with auth key 3 and returns its ID.
+func (e *env) create(envelope string, device ed25519.PrivateKey) string {
 	e.t.Helper()
-	rec := e.do("POST", "/v3/account", "", createBody(envelope, authKey, device))
+	rec := e.do("POST", "/v3/account", "", createBody(envelope, 3, device))
 	var rsp createResponse
 	if rec.Code != http.StatusCreated || json.Unmarshal(rec.Body.Bytes(), &rsp) != nil {
 		e.t.Fatalf("create: HTTP %d: %s", rec.Code, rec.Body)
@@ -134,7 +131,7 @@ func token(key ed25519.PrivateKey, account string) string {
 func TestCreateAndUnlock(t *testing.T) {
 	e := newEnv(t, Config{})
 	first, second := newDevice(t), newDevice(t)
-	account := e.create(id(1), 3, first)
+	account := e.create(id(1), first)
 
 	rec := e.do("POST", "/v3/unlock/params", "", paramsRequest{ID: id(1)})
 	var params paramsResponse
@@ -235,7 +232,7 @@ func TestRateLimits(t *testing.T) {
 		Attempts: ratelimit.NewPer(2, time.Hour),
 	})
 	device := newDevice(t)
-	account := e.create(id(1), 3, device)
+	account := e.create(id(1), device)
 	if rec := e.do("POST", "/v3/account", "", createBody(id(2), 3, newDevice(t))); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("second create: HTTP %d", rec.Code)
 	}
@@ -258,7 +255,7 @@ func TestRateLimits(t *testing.T) {
 func TestDevices(t *testing.T) {
 	e := newEnv(t, Config{MaxDevices: 3})
 	laptop, phone, tablet := newDevice(t), newDevice(t), newDevice(t)
-	account := e.create(id(1), 3, laptop)
+	account := e.create(id(1), laptop)
 	for _, d := range []struct {
 		key  ed25519.PrivateKey
 		name string
@@ -334,10 +331,10 @@ func TestDevices(t *testing.T) {
 func TestDeviceTokens(t *testing.T) {
 	e := newEnv(t, Config{})
 	device := newDevice(t)
-	account := e.create(id(1), 3, device)
+	account := e.create(id(1), device)
 	for name, tok := range map[string]string{
 		"none":          "",
-		"chain token":   auth.NewToken(device, time.Now()),
+		"garbage":       "abc",
 		"other account": token(device, id(9)),
 		"unknown key":   token(newDevice(t), account),
 		"expired":       auth.NewDeviceToken(device, account, time.Now().Add(-25*time.Hour)),
@@ -351,8 +348,8 @@ func TestDeviceTokens(t *testing.T) {
 func TestChains(t *testing.T) {
 	e := newEnv(t, Config{MaxChains: 2})
 	alice, bob := newDevice(t), newDevice(t)
-	aliceAccount := e.create(id(1), 3, alice)
-	bobAccount := e.create(id(2), 3, bob)
+	aliceAccount := e.create(id(1), alice)
+	bobAccount := e.create(id(2), bob)
 
 	probe := func(key ed25519.PrivateKey, account, chainID string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -376,32 +373,21 @@ func TestChains(t *testing.T) {
 		t.Fatalf("over MaxChains: HTTP %d", rec.Code)
 	}
 
-	// A chain of the old scheme is nobody's to take, and chain tokens keep
-	// reaching it; an account's chain refuses them.
-	oldKey := newDevice(t)
-	oldChain := auth.ChainID(oldKey.Public().(ed25519.PublicKey))
+	// A chain of no account (left by the old scheme) is nobody's to take.
+	oldChain := auth.ChainID(newDevice(t).Public().(ed25519.PublicKey))
 	if err := e.store.Create(t.Context(), oldChain, 0, func(store.Tx) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if rec := probe(bob, bobAccount, oldChain); rec.Code != http.StatusForbidden {
 		t.Fatalf("claim of an old chain: HTTP %d", rec.Code)
 	}
-	if rec := e.do("GET", "/v2/probe", auth.NewToken(oldKey, time.Now()), nil); rec.Code != 200 {
-		t.Fatalf("v2 on an old chain: HTTP %d", rec.Code)
-	}
-	accountChainKey := newDevice(t)
-	accountChain := auth.ChainID(accountChainKey.Public().(ed25519.PublicKey))
-	probe(bob, bobAccount, accountChain)
-	if rec := e.do("GET", "/v2/probe", auth.NewToken(accountChainKey, time.Now()), nil); rec.Code != http.StatusForbidden {
-		t.Fatalf("v2 on an account's chain: HTTP %d", rec.Code)
-	}
 }
 
 func TestDeleteAccount(t *testing.T) {
 	e := newEnv(t, Config{})
 	device, other := newDevice(t), newDevice(t)
-	account := e.create(id(1), 3, device)
-	keep := e.create(id(2), 3, other)
+	account := e.create(id(1), device)
+	keep := e.create(id(2), other)
 	for _, chainID := range []string{id(0xa1), id(0xa2)} {
 		e.do("GET", "/v3/chains/"+chainID+"/probe", token(device, account), nil)
 	}
@@ -432,5 +418,5 @@ func TestDeleteAccount(t *testing.T) {
 		t.Fatalf("device of a deleted account: HTTP %d", rec.Code)
 	}
 	// The words are free for a new account.
-	e.create(id(1), 3, newDevice(t))
+	e.create(id(1), newDevice(t))
 }

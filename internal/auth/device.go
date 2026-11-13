@@ -17,7 +17,7 @@ import (
 //	issued at = Unix time in milliseconds, big-endian
 //	signature = Ed25519(device key, "alerse-sync-device-token-v1" | account | public key | issued at)
 //
-// The time window is the chain token's. A valid signature proves only that
+// The time window is MaxAge and MaxSkew. A valid signature proves only that
 // the device holds its key; the caller checks that the key is an active
 // device of the account.
 const (
@@ -93,8 +93,8 @@ func DeviceFromContext(ctx context.Context) (Device, bool) {
 	return d, ok
 }
 
-// WithChain returns ctx with the chain a request is about, as Middleware
-// stores it, for handlers that check access to the chain in another way.
+// WithChain returns ctx with the chain a request is about, once the
+// device's access to it is checked (account.ChainAccess).
 func WithChain(ctx context.Context, chainID string) context.Context {
 	return context.WithValue(ctx, contextKey{}, chainID)
 }

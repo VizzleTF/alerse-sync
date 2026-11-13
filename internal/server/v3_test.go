@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,8 +24,7 @@ import (
 
 const testAccount = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 
-// TestV3Chain syncs a chain with a device token, and checks that the chain's
-// own key no longer reaches it over /v2.
+// TestV3Chain syncs a chain with a device token.
 func TestV3Chain(t *testing.T) {
 	var logs bytes.Buffer
 	st := memory.New()
@@ -55,18 +56,11 @@ func TestV3Chain(t *testing.T) {
 	if owner, ok, _ := st.ChainAccount(t.Context(), chainID); !ok || owner != testAccount {
 		t.Fatal("the chain did not become the account's")
 	}
-	// The chain token of the same chain is refused now.
-	rec = do(h, request{path: "/v2/command/", body: getUpdates(t), token: auth.NewToken(chainKey, time.Now())})
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("v2 on an account's chain: HTTP %d", rec.Code)
-	}
-	// So is a chain token on /v3, and a device token on /v2.
-	rec = do(h, request{path: "/v3/chains/" + chainID + "/command/", body: getUpdates(t), token: auth.NewToken(chainKey, time.Now())})
+	// A token of a device the account does not have is refused.
+	_, stranger, _ := ed25519.GenerateKey(nil)
+	rec = do(h, request{path: "/v3/chains/" + chainID + "/command/", body: getUpdates(t), token: auth.NewDeviceToken(stranger, testAccount, time.Now())})
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("chain token on v3: HTTP %d", rec.Code)
-	}
-	if rec := do(h, request{path: "/v2/command/", body: getUpdates(t), token: deviceToken}); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("device token on v2: HTTP %d", rec.Code)
+		t.Fatalf("unknown device on v3: HTTP %d", rec.Code)
 	}
 
 	// Events of the chain.
@@ -103,4 +97,37 @@ func TestLogPath(t *testing.T) {
 			t.Errorf("logPath(%q) = %q, want %q", path, got, want)
 		}
 	}
+}
+
+// accountsFor returns /v3 accounts on st with a cheap Argon2id.
+func accountsFor(st store.AccountStore) *account.Accounts {
+	return account.New(account.Config{
+		Store: st, Hash: credential.Hash{Time: 1, Memory: 64, Threads: 1},
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+}
+
+// testChain makes an account with one device in st and returns the command
+// and events paths of a new chain of it, and the device's token.
+func testChain(t *testing.T, st store.AccountStore) (command, events, token string) {
+	t.Helper()
+	random := func() string {
+		raw := make([]byte, 32)
+		if _, err := rand.Read(raw); err != nil {
+			t.Fatal(err)
+		}
+		return hex.EncodeToString(raw)
+	}
+	_, device, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID := random()
+	if err := st.CreateAccount(t.Context(), store.Account{ID: accountID, Kind: store.AccountKindSK},
+		store.Envelope{ID: random(), Scheme: account.SchemeSK},
+		store.Device{PublicKey: device.Public().(ed25519.PublicKey), Name: "Test"}); err != nil {
+		t.Fatal(err)
+	}
+	chain := "/v3/chains/" + random()
+	return chain + "/command", chain + "/events", auth.NewDeviceToken(device, accountID, time.Now())
 }

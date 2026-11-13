@@ -28,13 +28,6 @@ type config struct {
 	ratePerAddrPerMinute   int
 	newChainsPerAddrPerDay int
 	maxConcurrent          int
-	loginAttemptsPerHour   int
-	loginAttemptsPerAddr   int
-	loginLookupsPerAddr    int
-	loginChangesPerHour    int
-	pairOpensPerHour       int
-	pairJoinsPerAddr       int
-	pairReadsPerAddr       int
 	newAccountsPerAddr     int
 	unlockAttemptsPerHour  int
 	unlockAttemptsPerAddr  int
@@ -143,13 +136,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 	number("RATE_LIMIT_PER_MINUTE", &c.ratePerMinute, 600)
 	number("RATE_LIMIT_PER_IP_PER_MINUTE", &c.ratePerAddrPerMinute, 1200)
 	number("NEW_CHAINS_PER_IP_PER_DAY", &c.newChainsPerAddrPerDay, 10)
-	number("LOGIN_ATTEMPTS_PER_HOUR", &c.loginAttemptsPerHour, 10)
-	number("LOGIN_ATTEMPTS_PER_IP_PER_HOUR", &c.loginAttemptsPerAddr, 30)
-	number("LOGIN_LOOKUPS_PER_IP_PER_HOUR", &c.loginLookupsPerAddr, 120)
-	number("LOGIN_CHANGES_PER_HOUR", &c.loginChangesPerHour, 30)
-	number("PAIR_CODES_PER_HOUR", &c.pairOpensPerHour, 20)
-	number("PAIR_JOINS_PER_IP_PER_HOUR", &c.pairJoinsPerAddr, 30)
-	number("PAIR_READS_PER_IP_PER_HOUR", &c.pairReadsPerAddr, 1200)
 	number("NEW_ACCOUNTS_PER_IP_PER_DAY", &c.newAccountsPerAddr, 10)
 	number("UNLOCK_ATTEMPTS_PER_HOUR", &c.unlockAttemptsPerHour, 10)
 	number("UNLOCK_ATTEMPTS_PER_IP_PER_HOUR", &c.unlockAttemptsPerAddr, 30)

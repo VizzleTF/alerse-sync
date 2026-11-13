@@ -14,7 +14,6 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"github.com/VizzleTF/arcomium-sync/internal/auth"
 	pb "github.com/VizzleTF/arcomium-sync/internal/syncpb"
 )
 
@@ -28,9 +27,9 @@ func TestTwoInstances(t *testing.T) {
 	defer other.Close()
 	defer hub.Close()
 
-	key := newChain(t)
-	a := &device{t: t, key: key, guid: "a"}
-	b := &device{t: t, key: key, guid: "b", url: other.URL + "/v2"}
+	acc := newAccount(t)
+	a := acc.device("a", "")
+	b := acc.device("b", other.URL)
 	a.bookmarks()
 	b.bookmarks()
 	stream := b.events(ctx)
@@ -51,8 +50,8 @@ func TestShutdownWaitsForCommits(t *testing.T) {
 	srv.Start()
 	defer hub.Close()
 
-	key := newChain(t)
-	a := &device{t: t, key: key, guid: "a", url: srv.URL + "/v2"}
+	acc := newAccount(t)
+	a := acc.device("a", srv.URL)
 	a.bookmarks()
 	stream := a.events(ctx)
 	expectEvent(t, stream, "ready {}")
@@ -71,8 +70,8 @@ func TestShutdownWaitsForCommits(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	fmt.Fprintf(conn, "POST /v2/command/ HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\n\r\n",
-		auth.NewToken(key, time.Now()), len(body))
+	fmt.Fprintf(conn, "POST /v3/chains/%s/command/ HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\n\r\n",
+		acc.chain, a.bearer(), len(body))
 	conn.Write(body[:len(body)/2]) //nolint:errcheck // checked by the response
 	time.Sleep(100 * time.Millisecond)
 
@@ -109,7 +108,7 @@ func TestShutdownWaitsForCommits(t *testing.T) {
 	}
 
 	// The commit is there for the next instance.
-	if got := (&device{t: t, key: key, guid: "b"}).bookmarks(); len(got) != 5 {
+	if got := acc.device("b", "").bookmarks(); len(got) != 5 {
 		t.Fatalf("after shutdown: %d bookmark entities, want 5", len(got))
 	}
 }

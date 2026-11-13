@@ -54,7 +54,7 @@ const (
 	maxName     = 64
 	// fakeSecret names the server secret that makes up salts and verifiers
 	// for envelope ids that do not exist.
-	fakeSecret = "account-fake-salt" //nolint:gosec // the name of the secret, not its value
+	fakeSecret = "account-fake-salt"
 	// TouchInterval is how often a device's last contact is recorded.
 	TouchInterval = 5 * time.Minute
 )
@@ -486,7 +486,7 @@ func (a *Accounts) Authenticate(next http.Handler) http.Handler {
 // request's {chain} path value, if the chain is its account's. A chain that
 // does not exist yet becomes the account's on first use; a chain of
 // another account, or an existing chain of no account, gets 403. It stores
-// the chain as auth.Middleware does, for the handlers of /v2.
+// the chain in the request context for the protocol and event handlers.
 func (a *Accounts) ChainAccess(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		d, _ := auth.DeviceFromContext(r.Context())
@@ -517,41 +517,6 @@ func (a *Accounts) ChainAccess(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(auth.WithChain(r.Context(), chainID)))
-	})
-}
-
-// RefuseAccountChains refuses chain tokens (/v2) of chains that belong to
-// an account with 403: every device of the account knows the chain's key,
-// a removed one too, so only device tokens may reach such a chain. It takes
-// the chain auth.Middleware stored, or else checks the request's token
-// itself; requests without a valid chain token pass, for the handlers
-// behind to check.
-func (a *Accounts) RefuseAccountChains(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		chainID := auth.ChainFromContext(r.Context())
-		if chainID == "" {
-			token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if !ok {
-				next.ServeHTTP(w, r)
-				return
-			}
-			var err error
-			if chainID, err = auth.Verify(token, time.Now()); err != nil {
-				next.ServeHTTP(w, r)
-				return
-			}
-		}
-		_, owned, err := a.Store.ChainAccount(r.Context(), chainID)
-		if err != nil {
-			a.Log.Error("look up chain account", "error", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if owned {
-			http.Error(w, "the sync chain belongs to an account; use /v3", http.StatusForbidden)
-			return
-		}
-		next.ServeHTTP(w, r)
 	})
 }
 

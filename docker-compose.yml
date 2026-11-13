@@ -4,7 +4,7 @@
 #   SYNC_DOMAIN=sync.example.com POSTGRES_PASSWORD=change-me docker compose up -d
 #
 # SYNC_DOMAIN has to point at this host, with ports 80 and 443 open. Then set
-# Arcomium's sync server to https://<SYNC_DOMAIN>/v2.
+# Alerse's sync server to https://<SYNC_DOMAIN>.
 #
 # Without a domain, on a home network or behind Tailscale: remove the caddy
 # service and uncomment the ports of sync below. Plain HTTP is for loopback

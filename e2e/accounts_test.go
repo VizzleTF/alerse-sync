@@ -179,7 +179,7 @@ func TestAccountOnPostgres(t *testing.T) {
 
 	// Both sync a chain of the account, and the phone hears of the laptop's
 	// commit.
-	chainID := auth.ChainID(publicKey(newChain(t)))
+	chainID := randomHex(t)
 	a := accountDevice(t, laptop, created.Account, chainID, "laptop")
 	b := accountDevice(t, phone, created.Account, chainID, "phone")
 	a.bookmarks()
@@ -213,10 +213,11 @@ func TestAccountOnPostgres(t *testing.T) {
 	if status := commandStatus(t, baseURL+"/v3/chains/"+chainID, auth.NewDeviceToken(stranger, other.Account, time.Now())); status != 403 {
 		t.Fatalf("another account's device: HTTP %d", status)
 	}
-	// Nor can an account take over a chain of the old scheme.
-	old := &device{t: t, key: newChain(t), guid: "old"}
-	old.bookmarks()
-	oldChain := auth.ChainID(publicKey(old.key))
+	// Nor can an account take over a chain that no account owns.
+	oldChain := randomHex(t)
+	if err := st.Create(t.Context(), oldChain, 0, func(store.Tx) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
 	if status := commandStatus(t, baseURL+"/v3/chains/"+oldChain, auth.NewDeviceToken(stranger, other.Account, time.Now())); status != 403 {
 		t.Fatalf("claim of an old chain: HTTP %d", status)
 	}

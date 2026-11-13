@@ -26,9 +26,7 @@ import (
 	"github.com/VizzleTF/arcomium-sync/internal/clientip"
 	"github.com/VizzleTF/arcomium-sync/internal/credential"
 	"github.com/VizzleTF/arcomium-sync/internal/events"
-	"github.com/VizzleTF/arcomium-sync/internal/login"
 	"github.com/VizzleTF/arcomium-sync/internal/metrics"
-	"github.com/VizzleTF/arcomium-sync/internal/pairing"
 	"github.com/VizzleTF/arcomium-sync/internal/protocol"
 	"github.com/VizzleTF/arcomium-sync/internal/ratelimit"
 	"github.com/VizzleTF/arcomium-sync/internal/retention"
@@ -139,45 +137,17 @@ func run(ctx context.Context, log *slog.Logger) error {
 
 	chainLimiter := ratelimit.New(c.ratePerMinute)
 	addrLimiter := ratelimit.New(c.ratePerAddrPerMinute)
-	loginAttempts := ratelimit.NewPer(c.loginAttemptsPerHour, time.Hour)
-	loginAddrAttempts := ratelimit.NewPer(c.loginAttemptsPerAddr, time.Hour)
-	loginLookups := ratelimit.NewPer(c.loginLookupsPerAddr, time.Hour)
-	loginChanges := ratelimit.NewPer(c.loginChangesPerHour, time.Hour)
-	pairOpens := ratelimit.NewPer(c.pairOpensPerHour, time.Hour)
-	pairJoins := ratelimit.NewPer(c.pairJoinsPerAddr, time.Hour)
-	pairReads := ratelimit.NewPer(c.pairReadsPerAddr, time.Hour)
 	newAccounts := ratelimit.NewPer(c.newAccountsPerAddr, 24*time.Hour)
 	unlockAttempts := ratelimit.NewPer(c.unlockAttemptsPerHour, time.Hour)
 	unlockAddrAttempts := ratelimit.NewPer(c.unlockAttemptsPerAddr, time.Hour)
 	unlockLookups := ratelimit.NewPer(c.unlockLookupsPerAddr, time.Hour)
 	accountChanges := ratelimit.NewPer(c.accountChangesPerHour, time.Hour)
 	limiters := []*ratelimit.Limiter{
-		chainLimiter, addrLimiter, newChains, loginAttempts, loginAddrAttempts, loginLookups,
-		loginChanges, pairOpens, pairJoins, pairReads,
+		chainLimiter, addrLimiter, newChains,
 		newAccounts, unlockAttempts, unlockAddrAttempts, unlockLookups, accountChanges,
 	}
-	// One hasher, so that the Argon2id memory of sign-ins and unlocks adds
-	// up to one bound.
+	// One hasher, so that the Argon2id memory of unlocks adds up to one bound.
 	hasher := credential.NewHasher(credential.DefaultHash)
-	pairHandler := pairing.Handler(pairing.Config{
-		Store:   st,
-		Opens:   pairOpens,
-		Joins:   pairJoins,
-		Reads:   pairReads,
-		Log:     log,
-		Metrics: m,
-	})
-	loginHandler := login.Handler(login.Config{
-		Store:        st,
-		EnsureChain:  service.EnsureChain,
-		Attempts:     loginAttempts,
-		AddrAttempts: loginAddrAttempts,
-		Lookups:      loginLookups,
-		Changes:      loginChanges,
-		Hasher:       hasher,
-		Log:          log,
-		Metrics:      m,
-	})
 	accounts := account.New(account.Config{
 		Store:        st,
 		Hasher:       hasher,
@@ -198,8 +168,6 @@ func run(ctx context.Context, log *slog.Logger) error {
 	handler := server.Handler(server.Config{
 		Service:     service,
 		Events:      hub,
-		Login:       loginHandler,
-		Pair:        pairHandler,
 		Accounts:    accounts,
 		Limiter:     chainLimiter,
 		AddrLimiter: addrLimiter,

@@ -93,10 +93,6 @@ func (h *handler) observe(next http.Handler) http.Handler {
 
 func routeOf(path string) string {
 	switch path {
-	case "/v2/command", "/v2/command/":
-		return "command"
-	case "/v2/events":
-		return "events"
 	case "/health", "/livez", "/readyz":
 		return "probe"
 	}

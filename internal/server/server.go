@@ -1,10 +1,5 @@
 // Package server is the HTTP interface of the sync server:
 //
-//	POST /v2/command/   Chromium sync protocol (protobuf), authenticated
-//	GET  /v2/events     Server-Sent Events of a chain, authenticated
-//	/v2/login...        optional sign-in with a login name and password
-//	                    (internal/login)
-//	/v2/pair...         relay for pairing a new device (internal/pairing)
 //	/v3/account, /v3/unlock..., /v3/devices...
 //	                    accounts with device keys (internal/account)
 //	POST /v3/chains/{chain}/command/, GET /v3/chains/{chain}/events
@@ -65,11 +60,7 @@ const (
 type Config struct {
 	Service *protocol.Service
 	Events  http.Handler
-	// Login serves /v2/login, Pair /v2/pair; nil leaves them out.
-	Login http.Handler
-	Pair  http.Handler
-	// Accounts serves /v3 and keeps chain tokens away from the chains of
-	// accounts; nil leaves /v3 out.
+	// Accounts serves /v3: accounts, devices and their chains.
 	Accounts *account.Accounts
 	// Limiter limits requests per sync chain, AddrLimiter per client
 	// address; nil for no limit.
@@ -113,27 +104,7 @@ func Handler(c Config) http.Handler {
 		h.slots = make(chan struct{}, c.MaxConcurrent)
 		h.readers = make(chan struct{}, c.MaxConcurrent*readersPerSlot)
 	}
-	// v2 refuses chain tokens of an account's chains.
-	v2 := func(next http.Handler) http.Handler { return next }
-	if c.Accounts != nil {
-		v2 = c.Accounts.RefuseAccountChains
-	}
-	command := h.limitAddr(true, auth.Middleware(v2(h.named(http.HandlerFunc(h.command)))))
-	events := h.limitAddr(false, auth.Middleware(v2(h.named(h.limitChain(h.requireChain(c.Events))))))
 	mux := http.NewServeMux()
-	mux.Handle("POST /v2/command/{$}", command)
-	mux.Handle("POST /v2/command", command)
-	mux.Handle("GET /v2/events", events)
-	if c.Login != nil {
-		login := h.limitAddr(false, v2(c.Login))
-		mux.Handle("/v2/login", login)
-		mux.Handle("/v2/login/", login)
-	}
-	if c.Pair != nil {
-		pair := h.limitAddr(false, v2(c.Pair))
-		mux.Handle("/v2/pair", pair)
-		mux.Handle("/v2/pair/", pair)
-	}
 	if a := c.Accounts; a != nil {
 		chain := func(next http.Handler) http.Handler { return a.Authenticate(a.ChainAccess(h.named(next))) }
 		command := h.limitAddr(true, chain(http.HandlerFunc(h.command)))
