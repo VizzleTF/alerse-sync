@@ -25,7 +25,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/VizzleTF/arcomium-sync/internal/account"
 	"github.com/VizzleTF/arcomium-sync/internal/auth"
+	"github.com/VizzleTF/arcomium-sync/internal/credential"
 	"github.com/VizzleTF/arcomium-sync/internal/events"
 	"github.com/VizzleTF/arcomium-sync/internal/login"
 	"github.com/VizzleTF/arcomium-sync/internal/pairing"
@@ -40,9 +42,11 @@ const bookmarkType = 32904
 
 var (
 	serverURL string
-	pool      *pgxpool.Pool
-	st        *postgres.Store
-	testLog   = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	// baseURL is the server's, without /v2.
+	baseURL string
+	pool    *pgxpool.Pool
+	st      *postgres.Store
+	testLog = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 )
 
 func TestMain(m *testing.M) {
@@ -67,6 +71,7 @@ func run(m *testing.M) int {
 	srv.Start()
 	defer srv.Close()
 	defer hub.Close()
+	baseURL = srv.URL
 	serverURL = srv.URL + "/v2"
 	return m.Run()
 }
@@ -77,6 +82,10 @@ func newInstance(ctx context.Context) (*httptest.Server, *events.Hub) {
 	hub := events.New(pool, testLog, 8, 100)
 	go hub.Listen(ctx)
 	service := protocol.New(st, hub, protocol.DefaultLimits)
+	accounts := account.New(account.Config{
+		Store: st, Hash: credential.Hash{Time: 1, Memory: 1024, Threads: 1},
+		Cleared: service.Cleared, Log: testLog,
+	})
 	srv := httptest.NewUnstartedServer(server.Handler(server.Config{
 		Service: service,
 		Events:  hub,
@@ -84,7 +93,8 @@ func newInstance(ctx context.Context) (*httptest.Server, *events.Hub) {
 			Store: st, EnsureChain: service.EnsureChain, Log: testLog,
 			Hash: login.Hash{Time: 1, Memory: 1024, Threads: 1},
 		}),
-		Pair: pairing.Handler(pairing.Config{Store: st, Log: testLog}),
+		Pair:     pairing.Handler(pairing.Config{Store: st, Log: testLog}),
+		Accounts: accounts,
 		ChainExists: func(ctx context.Context, chainID string) (bool, error) {
 			_, ok, err := st.Chain(ctx, chainID)
 			return ok, err
@@ -105,6 +115,15 @@ type device struct {
 	token    []byte
 	// url is the server's, if not serverURL.
 	url string
+	// newToken, if set, issues the device's tokens instead of the chain key.
+	newToken func() string
+}
+
+func (d *device) bearer() string {
+	if d.newToken != nil {
+		return d.newToken()
+	}
+	return auth.NewToken(d.key, time.Now())
 }
 
 func (d *device) server() string {
@@ -134,7 +153,7 @@ func (d *device) send(msg *pb.ClientToServerMessage) *pb.ClientToServerResponse 
 		d.t.Fatal(err)
 	}
 	req, _ := http.NewRequest(http.MethodPost, d.server()+"/command/?client=Chromium", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+auth.NewToken(d.key, time.Now()))
+	req.Header.Set("Authorization", "Bearer "+d.bearer())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		d.t.Fatal(err)
@@ -207,7 +226,7 @@ func bookmark(id, title string) *pb.SyncEntity {
 func (d *device) events(ctx context.Context) <-chan string {
 	d.t.Helper()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, d.server()+"/events?cache_guid="+d.guid, nil)
-	req.Header.Set("Authorization", "Bearer "+auth.NewToken(d.key, time.Now()))
+	req.Header.Set("Authorization", "Bearer "+d.bearer())
 	resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // the reader below closes it
 	if err != nil {
 		d.t.Fatal(err)

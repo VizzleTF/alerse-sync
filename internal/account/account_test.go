@@ -26,17 +26,27 @@ import (
 // cheap keeps the tests fast; the cost does not change what is tested.
 var cheap = credential.Hash{Time: 1, Memory: 64, Threads: 1}
 
+// testStore keeps accounts and chains.
+type testStore interface {
+	store.Store
+	store.AccountStore
+}
+
+// newStore returns an empty store for a test: in memory, or in Postgres
+// with -tags integration.
+var newStore = func(*testing.T) testStore { return memory.New() }
+
 type env struct {
 	t        *testing.T
 	h        http.Handler
-	store    *memory.Store
+	store    testStore
 	accounts *Accounts
 	cleared  []string
 }
 
 func newEnv(t *testing.T, c Config) *env {
 	t.Helper()
-	e := &env{t: t, store: memory.New()}
+	e := &env{t: t, store: newStore(t)}
 	c.Store = e.store
 	c.Hash = cheap
 	c.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -310,10 +320,14 @@ func TestDevices(t *testing.T) {
 
 	// Removed records go after RemovedDeviceTTL, and then the key may join
 	// again.
-	e.store.Now = func() time.Time { return time.Now().Add(91 * 24 * time.Hour) }
-	done, _ := e.store.Collect(t.Context(), store.Retention{Now: e.store.Now(), RemovedDeviceTTL: 90 * 24 * time.Hour})
-	if done.RemovedDevices != 2 {
-		t.Fatalf("collected %d device records, want 2", done.RemovedDevices)
+	done, err := e.store.Collect(t.Context(), store.Retention{
+		Now: time.Now().Add(91 * 24 * time.Hour), RemovedDeviceTTL: 90 * 24 * time.Hour, Batch: 100,
+	})
+	if err != nil || done.RemovedDevices != 2 {
+		t.Fatalf("collected %d device records, want 2: %v", done.RemovedDevices, err)
+	}
+	if rec := e.unlock(id(1), 3, tablet, "Tablet"); rec.Code != 200 {
+		t.Fatalf("a key whose record went: HTTP %d", rec.Code)
 	}
 }
 
