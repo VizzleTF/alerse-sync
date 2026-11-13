@@ -35,6 +35,14 @@ type config struct {
 	pairOpensPerHour       int
 	pairJoinsPerAddr       int
 	pairReadsPerAddr       int
+	newAccountsPerAddr     int
+	unlockAttemptsPerHour  int
+	unlockAttemptsPerAddr  int
+	unlockLookupsPerAddr   int
+	accountChangesPerHour  int
+	maxAccounts            int64
+	maxDevicesPerAccount   int
+	maxChainsPerAccount    int
 	maxEventStreams        int
 	maxStreamsPerAddr      int
 	maxStreamsTotal        int
@@ -142,6 +150,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 	number("PAIR_CODES_PER_HOUR", &c.pairOpensPerHour, 20)
 	number("PAIR_JOINS_PER_IP_PER_HOUR", &c.pairJoinsPerAddr, 30)
 	number("PAIR_READS_PER_IP_PER_HOUR", &c.pairReadsPerAddr, 1200)
+	number("NEW_ACCOUNTS_PER_IP_PER_DAY", &c.newAccountsPerAddr, 10)
+	number("UNLOCK_ATTEMPTS_PER_HOUR", &c.unlockAttemptsPerHour, 10)
+	number("UNLOCK_ATTEMPTS_PER_IP_PER_HOUR", &c.unlockAttemptsPerAddr, 30)
+	number("UNLOCK_LOOKUPS_PER_IP_PER_HOUR", &c.unlockLookupsPerAddr, 120)
+	number("ACCOUNT_CHANGES_PER_HOUR", &c.accountChangesPerHour, 120)
+	count("MAX_ACCOUNTS", &c.maxAccounts, 0)
+	number("MAX_DEVICES_PER_ACCOUNT", &c.maxDevicesPerAccount, 50)
+	number("MAX_CHAINS_PER_ACCOUNT", &c.maxChainsPerAccount, 50)
 	count("MAX_ENTITIES", &c.limits.MaxEntities, protocol.DefaultLimits.MaxEntities)
 	size("MAX_BYTES_PER_CHAIN", &c.limits.MaxBytes, protocol.DefaultLimits.MaxBytes)
 	count("MAX_HISTORY_ENTITIES", &c.limits.MaxHistoryEntities, protocol.DefaultLimits.MaxHistoryEntities)
@@ -158,6 +174,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	duration("HISTORY_TTL", &c.retention.ExpiringTypesTTL, 90*day)
 	duration("EMPTY_CHAIN_TTL", &c.retention.EmptyChainTTL, 7*day)
 	duration("INACTIVE_CHAIN_TTL", &c.retention.InactiveChainTTL, 0)
+	duration("REMOVED_DEVICE_TTL", &c.retention.RemovedDeviceTTL, 90*day)
 	duration("RETENTION_INTERVAL", &c.retentionInterval, time.Hour)
 	boolean("ACCESS_LOG", &c.accessLog, true)
 	duration("SHUTDOWN_DELAY", &c.shutdownDelay, 0)

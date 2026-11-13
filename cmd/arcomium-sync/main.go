@@ -22,7 +22,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/VizzleTF/arcomium-sync/internal/account"
 	"github.com/VizzleTF/arcomium-sync/internal/clientip"
+	"github.com/VizzleTF/arcomium-sync/internal/credential"
 	"github.com/VizzleTF/arcomium-sync/internal/events"
 	"github.com/VizzleTF/arcomium-sync/internal/login"
 	"github.com/VizzleTF/arcomium-sync/internal/metrics"
@@ -144,10 +146,19 @@ func run(ctx context.Context, log *slog.Logger) error {
 	pairOpens := ratelimit.NewPer(c.pairOpensPerHour, time.Hour)
 	pairJoins := ratelimit.NewPer(c.pairJoinsPerAddr, time.Hour)
 	pairReads := ratelimit.NewPer(c.pairReadsPerAddr, time.Hour)
+	newAccounts := ratelimit.NewPer(c.newAccountsPerAddr, 24*time.Hour)
+	unlockAttempts := ratelimit.NewPer(c.unlockAttemptsPerHour, time.Hour)
+	unlockAddrAttempts := ratelimit.NewPer(c.unlockAttemptsPerAddr, time.Hour)
+	unlockLookups := ratelimit.NewPer(c.unlockLookupsPerAddr, time.Hour)
+	accountChanges := ratelimit.NewPer(c.accountChangesPerHour, time.Hour)
 	limiters := []*ratelimit.Limiter{
 		chainLimiter, addrLimiter, newChains, loginAttempts, loginAddrAttempts, loginLookups,
 		loginChanges, pairOpens, pairJoins, pairReads,
+		newAccounts, unlockAttempts, unlockAddrAttempts, unlockLookups, accountChanges,
 	}
+	// One hasher, so that the Argon2id memory of sign-ins and unlocks adds
+	// up to one bound.
+	hasher := credential.NewHasher(credential.DefaultHash)
 	pairHandler := pairing.Handler(pairing.Config{
 		Store:   st,
 		Opens:   pairOpens,
@@ -163,6 +174,22 @@ func run(ctx context.Context, log *slog.Logger) error {
 		AddrAttempts: loginAddrAttempts,
 		Lookups:      loginLookups,
 		Changes:      loginChanges,
+		Hasher:       hasher,
+		Log:          log,
+		Metrics:      m,
+	})
+	accounts := account.New(account.Config{
+		Store:        st,
+		Hasher:       hasher,
+		Creates:      newAccounts,
+		Lookups:      unlockLookups,
+		Attempts:     unlockAttempts,
+		AddrAttempts: unlockAddrAttempts,
+		Changes:      accountChanges,
+		MaxAccounts:  c.maxAccounts,
+		MaxDevices:   c.maxDevicesPerAccount,
+		MaxChains:    c.maxChainsPerAccount,
+		Cleared:      service.Cleared,
 		Log:          log,
 		Metrics:      m,
 	})
@@ -173,6 +200,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		Events:      hub,
 		Login:       loginHandler,
 		Pair:        pairHandler,
+		Accounts:    accounts,
 		Limiter:     chainLimiter,
 		AddrLimiter: addrLimiter,
 		ClientIP:    clientip.New(c.trustedProxies, c.clientIPHeader),
