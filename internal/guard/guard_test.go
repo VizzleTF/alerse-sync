@@ -10,8 +10,10 @@ func TestGuard(t *testing.T) {
 	g := New(3, time.Minute, 10*time.Minute)
 	g.now = func() time.Time { return now }
 
-	if g.Fail("a") || g.Fail("a") {
-		t.Fatal("shut out before the third failure")
+	for i := range 2 {
+		if g.Fail("a") {
+			t.Fatalf("shut out at failure %d of 3", i+1)
+		}
 	}
 	if banned, _ := g.Banned("a"); banned {
 		t.Fatal("banned after two failures")
@@ -31,12 +33,10 @@ func TestGuard(t *testing.T) {
 	}
 
 	// Failures spread wider than the window do not add up.
-	for range 5 {
+	for i := range 5 {
 		if g.Fail("c") {
-			now = now.Add(time.Minute)
-			t.Fatal("failures a minute apart shut the address out")
+			t.Fatalf("failure %d, a minute after the one before, shut the address out", i+1)
 		}
-		g.Fail("c")
 		now = now.Add(time.Minute)
 	}
 }
