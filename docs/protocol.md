@@ -48,9 +48,10 @@ signature = Ed25519(device key, "alerse-sync-device-token-v1" | account | public
 `account` is the account ID the server handed out, as 32 bytes. The server
 accepts a token from 24 hours before to 5 minutes after its own clock and keeps
 no session state, so a client can issue a new token for every request. On every
-request it checks that the key is an active device of the account, so a removed
-device is refused from its next request on. A bad or expired token gets HTTP
-401, which makes Chromium ask for a new one. `internal/auth` implements this.
+request it checks that the key is an active device of the account. A bad or
+expired token gets HTTP 401, which makes Chromium ask for a new one.
+`internal/auth` implements this. [Refusing abuse](#refusing-abuse) says what
+the server remembers to skip the database.
 
 **Requests.** Bodies are JSON; byte strings are standard base64. IDs are 64
 lowercase hex digits; a device's ID is its public key in hex.
@@ -63,7 +64,7 @@ lowercase hex digits; a device's ID is its public key in hex.
 | `GET /v3/account` | device | | `{"account","kind","created"}` |
 | `DELETE /v3/account` | device | `{"auth"}` | 204 |
 | `GET /v3/devices` | device | | `{"devices":[{"id","name","created","last_seen","current"}]}` |
-| `DELETE /v3/devices/{id}` | device | `{"auth"}` | 204; 404; 409 for the account's only device |
+| `DELETE /v3/devices/{id}` | device | `{"auth"}`, or none for the device itself | 204; 404; 409 for the account's only device |
 | `POST /v3/chains/{chain}/command/` | device | protocol | [The sync protocol](#the-sync-protocol) |
 | `GET /v3/chains/{chain}/events` | device | | [Events](#events) |
 
@@ -71,9 +72,15 @@ lowercase hex digits; a device's ID is its public key in hex.
   device that sends it, or renames it if it is in the account already. A
   device name is 1 to 64 characters without control characters.
 - **Removing a device or the account** takes `auth` again, so a stolen device
-  that is still signed in cannot lock its owner out. A device may remove
-  itself while another one is left; the last one goes only with the account.
-  A removed key never joins the account again: the client makes a new key.
+  that is still signed in cannot lock its owner out. A device signs itself out
+  without it, since it can only lose its own access, while another device is
+  left; the last one goes only with the account. A removed key never joins the
+  account again: the client makes a new key.
+- **One installation, one key.** The browser keeps its device key for as long
+  as it is installed and signs in again with the same key, which adds nothing.
+  A key new to the account takes the words and the password, counts against
+  `NEW_DEVICES_PER_ACCOUNT_PER_DAY` and `MAX_DEVICES_PER_ACCOUNT`, and shows in
+  every device's list.
 - **Deleting the account** removes its envelope, devices and chains with all
   their data, as ClearServerData does for one chain. The chains' event streams
   get `changed`, and the devices' next requests get 401.
@@ -104,6 +111,7 @@ words can derive the `id`.
 | `UNLOCK_ATTEMPTS_PER_HOUR` (10) | Password checks per envelope: unlocks, and `auth` on removals. The right password counts too |
 | `UNLOCK_ATTEMPTS_PER_IP_PER_HOUR` (30) | Password checks per client address |
 | `ACCOUNT_CHANGES_PER_HOUR` (120) | Account and device requests per account |
+| `NEW_DEVICES_PER_ACCOUNT_PER_DAY` (5) | Unlocks that add a key the account does not have |
 
 `MAX_ACCOUNTS` answers 503 to a create when the server is full,
 `MAX_DEVICES_PER_ACCOUNT` 409 to an unlock with a new key.
@@ -199,17 +207,26 @@ types conflict, except a deleted entity created again from version 0.
 | `MAX_HISTORY_ENTITIES` or `MAX_HISTORY_BYTES` of history and history delete directives | `SUCCESS`: the oldest visits are dropped, a hundredth more than needed. Clients expire history on their own, so nothing tells them |
 | `REQUIRE_CUSTOM_PASSPHRASE`, data of a type Chromium can encrypt while the chain's Nigori node is not in `CUSTOM_PASSPHRASE`, or such data unencrypted | `TRANSIENT_ERROR`: Chromium keeps the entity and commits it again later. Deletions, the Nigori node and never-encrypted types such as device info pass |
 
-**Commit delays.** Chromium waits before it commits a local change, to merge a
-burst of them: 2 seconds for bookmarks, 15 for open tabs. Every response tells
-clients to wait `SESSIONS_NUDGE_DELAY` (3 seconds) for open tabs instead
-(`client_command.custom_nudge_delays`, which Chromium applies as is), so a tab
-reaches the other devices about 3 to 4 seconds after it opened.
+**Commit delays.** Chromium waits before it commits a local change: the wait
+starts at the first change, and everything that changed meanwhile goes in one
+commit. A device with no changes sends nothing. Every response sets the wait
+(`client_command.custom_nudge_delays`, which Chromium applies as is):
+
+| Data | Wait | Chromium's own |
+|---|---|---|
+| Open tabs and windows | `SESSIONS_NUDGE_DELAY`, 15 s | 15 s |
+| Every other type | `NUDGE_DELAY`, 60 s | 2 s for bookmarks and settings, less for passwords |
+| Autofill, user events, encryption keys, device info, messages to other devices | Chromium's | up to 8 h; nothing for messages |
+
+The wait is a request to a well-behaved client. The server enforces its own
+limit on commits, `COMMITS_PER_CHAIN_PER_HOUR` below, whatever a client does.
 
 Deletions are always accepted. The limits on requests:
 
 | Limit | Answer |
 |---|---|
 | `RATE_LIMIT_PER_MINUTE` per chain, `RATE_LIMIT_PER_IP_PER_MINUTE` per client address | `THROTTLED` with `throttle_delay_seconds` |
+| `COMMITS_PER_CHAIN_PER_HOUR` (360, one per 10 s), of which `COMMIT_BURST` (120) at once for a first upload | `THROTTLED` with `throttle_delay_seconds` |
 | `NEW_CHAINS_PER_IP_PER_DAY`, on the request that would create a chain | `THROTTLED` until the address may create one |
 | `MAX_CHAINS` | `TRANSIENT_ERROR` on a new chain's first request |
 | No free slot of `MAX_CONCURRENT_REQUESTS` within 10 seconds | HTTP 503 with `Retry-After` |
@@ -217,6 +234,51 @@ Deletions are always accepted. The limits on requests:
 
 A client address is the connection's, or the one `TRUSTED_PROXY` proxies name
 in `CLIENT_IP_HEADER`. IPv6 clients count by their /64.
+
+## Refusing abuse
+
+A request passes these checks in order, each cheaper than the next, so that
+what a broken or hostile client sends costs the server as little as possible:
+
+| Step | Check | Costs | Refused with |
+|---|---|---|---|
+| 1 | The address is shut out | a map lookup | 429 with `Retry-After` |
+| 2 | `RATE_LIMIT_PER_IP_PER_MINUTE` | a map lookup | `THROTTLED`, or 429 |
+| 3 | The token's format, age and Ed25519 signature | about 50 µs | 401 |
+| 4 | `DEVICE_REQUESTS_PER_MINUTE` per device key, `DEVICE_REQUEST_BURST` at once | a map lookup | 429 |
+| 5 | The key is an active device of the account | memory; else one query | 401; 503 over `UNKNOWN_ACCOUNT_LOOKUPS_PER_SECOND` |
+| 6 | The chain is the account's | memory; else one query | 403 |
+| 7 | `RATE_LIMIT_PER_MINUTE` per chain | a map lookup | `THROTTLED` |
+| 8 | A declared body over `MAX_REQUEST_BYTES` | none: the body is not read | 413 |
+| 9 | The body, read within `BODY_READ_TIMEOUT`, decompressed, parsed | the body | 400, 408, 413 |
+| 10 | `COMMITS_PER_CHAIN_PER_HOUR` for a commit | a map lookup | `THROTTLED` |
+
+**Shutting out an address.** `BAN_AFTER_FAILURES` (30) refused requests from
+one address within `BAN_WINDOW` (10 minutes) shut it out for `BAN_DURATION`
+(15 minutes): its requests then get 429 before step 2. Refused means a 400,
+401, 403, 404, 405, 408, 413 or 429 answer, or `THROTTLED`: what a client that
+follows the protocol and its limits does not get often. A device whose chain
+does not exist yet is not refused when it asks for events. The address is
+logged once when it is shut out.
+
+**What the server remembers**, on each instance:
+
+- Device keys it found active, for 30 seconds: a removal on another instance
+  takes effect within that, one on the same instance at once.
+- Keys an account does not have, for 10 minutes, so a refused key is refused
+  again without a query.
+- Accounts with an active device, for 24 hours. An account ID comes from the
+  account's words and is never published, so a token naming an account the
+  instance has not seen is almost always made up: all such lookups together get
+  `UNKNOWN_ACCOUNT_LOOKUPS_PER_SECOND` (20, five times that at once). Under
+  attack, a real device the instance has not seen since its start waits a few
+  seconds at most.
+- Chain owners, for 10 minutes. An owner changes only when the chain is
+  deleted, and only the owner can derive a chain ID.
+
+In a test on one machine, made-up tokens from thousands of addresses reached
+the database 199 times in 5 seconds instead of 12,242, and a shut out address
+got 85,000 refusals a second.
 
 ## Events
 

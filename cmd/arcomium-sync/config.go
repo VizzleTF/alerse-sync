@@ -40,6 +40,16 @@ type config struct {
 	maxStreamsPerAddr      int
 	maxStreamsTotal        int
 	bodyTimeout            time.Duration
+	maxRequestBytes        int64
+	commitsPerChainPerHour int
+	commitBurst            int
+	deviceRequestsPerMin   int
+	deviceRequestBurst     int
+	newDevicesPerDay       int
+	unknownLookupsPerSec   int
+	banAfterFailures       int
+	banWindow              time.Duration
+	banDuration            time.Duration
 
 	trustedProxies []netip.Prefix
 	clientIPHeader string
@@ -156,6 +166,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 	number("MAX_EVENT_STREAMS_PER_IP", &c.maxStreamsPerAddr, 64)
 	number("MAX_EVENT_STREAMS_TOTAL", &c.maxStreamsTotal, 10000)
 	duration("BODY_READ_TIMEOUT", &c.bodyTimeout, server.DefaultBodyTimeout)
+	size("MAX_REQUEST_BYTES", &c.maxRequestBytes, server.DefaultMaxRequestBytes)
+	number("COMMITS_PER_CHAIN_PER_HOUR", &c.commitsPerChainPerHour, 360)
+	number("COMMIT_BURST", &c.commitBurst, 120)
+	number("DEVICE_REQUESTS_PER_MINUTE", &c.deviceRequestsPerMin, 60)
+	number("DEVICE_REQUEST_BURST", &c.deviceRequestBurst, 300)
+	number("NEW_DEVICES_PER_ACCOUNT_PER_DAY", &c.newDevicesPerDay, 5)
+	number("UNKNOWN_ACCOUNT_LOOKUPS_PER_SECOND", &c.unknownLookupsPerSec, 20)
+	number("BAN_AFTER_FAILURES", &c.banAfterFailures, 30)
+	duration("BAN_WINDOW", &c.banWindow, 10*time.Minute)
+	duration("BAN_DURATION", &c.banDuration, 15*time.Minute)
 	duration("TOMBSTONE_TTL", &c.retention.TombstoneTTL, 60*day)
 	duration("HISTORY_TTL", &c.retention.ExpiringTypesTTL, 90*day)
 	duration("EMPTY_CHAIN_TTL", &c.retention.EmptyChainTTL, 7*day)
@@ -164,6 +184,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	duration("RETENTION_INTERVAL", &c.retentionInterval, time.Hour)
 	boolean("ACCESS_LOG", &c.accessLog, true)
 	duration("SHUTDOWN_DELAY", &c.shutdownDelay, 0)
+	duration("NUDGE_DELAY", &c.limits.NudgeDelay, protocol.DefaultLimits.NudgeDelay)
 	duration("SESSIONS_NUDGE_DELAY", &c.limits.SessionsNudgeDelay, protocol.DefaultLimits.SessionsNudgeDelay)
 
 	if s, ok := env("TRUSTED_PROXY"); ok {

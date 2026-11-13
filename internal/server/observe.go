@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/VizzleTF/arcomium-sync/internal/clientip"
 )
 
 // requestInfo is what the handlers learn about a request for its log entry
@@ -16,6 +18,9 @@ type requestInfo struct {
 	message string
 	result  string
 	bytesIn int
+	// expected marks a refusal a well-behaved client gets too, which does
+	// not count against its address.
+	expected bool
 }
 
 type infoKey struct{}
@@ -61,9 +66,23 @@ func (h *handler) observe(next http.Handler) http.Handler {
 		info := &requestInfo{}
 		rec := &recorder{ResponseWriter: w}
 		start := time.Now()
-		next.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), infoKey{}, info)))
+		key := clientip.Key(clientip.FromContext(r.Context()))
+		if banned, wait := h.Guard.Banned(key); banned {
+			// Nothing else is done for a shut out address: no token check,
+			// no body, no database.
+			h.Metrics.Limited("banned")
+			info.result = "BANNED"
+			rec.Header().Set("Retry-After", strconv.Itoa(int(max(wait, time.Second)/time.Second)))
+			http.Error(rec, "too many refused requests", http.StatusTooManyRequests)
+		} else {
+			next.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), infoKey{}, info)))
+		}
 		if rec.status == 0 {
 			rec.status = http.StatusOK
+		}
+		if info.result != "BANNED" && refused(rec.status, info) && h.Guard.Fail(key) {
+			h.Metrics.Limited("ban")
+			h.Log.Warn("client address shut out", "addr", key)
 		}
 
 		route := routeOf(r.URL.Path)
@@ -89,6 +108,22 @@ func (h *handler) observe(next http.Handler) http.Handler {
 			slog.Int("bytes_in", info.bytesIn), slog.Int("bytes_out", rec.bytes),
 			slog.String("chain", chain), slog.String("message", info.message), slog.String("result", info.result))
 	})
+}
+
+// refused tells whether a response refuses something a client that follows
+// the protocol does not send: a bad token, a malformed or oversized body, a
+// path the server does not serve, a limit it was already told about.
+func refused(status int, info *requestInfo) bool {
+	if info.expected {
+		return false
+	}
+	switch status {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
+		http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusRequestTimeout,
+		http.StatusRequestEntityTooLarge, http.StatusTooManyRequests:
+		return true
+	}
+	return info.result == "THROTTLED"
 }
 
 func routeOf(path string) string {

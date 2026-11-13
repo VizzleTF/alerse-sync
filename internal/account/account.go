@@ -27,6 +27,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -74,6 +75,15 @@ type Config struct {
 	Attempts     *ratelimit.Limiter
 	AddrAttempts *ratelimit.Limiter
 	Changes      *ratelimit.Limiter
+	// DeviceRequests limits authenticated requests per device key, checked
+	// before the database; NewDevices limits keys added to an account. nil
+	// for no limit.
+	DeviceRequests *ratelimit.Limiter
+	NewDevices     *ratelimit.Limiter
+	// UnknownLookups limits, for the whole instance, database lookups of
+	// devices of accounts it has not seen: those of made-up tokens, and
+	// the first of each real account after a start. nil for no limit.
+	UnknownLookups *ratelimit.Limiter
 	// MaxAccounts, MaxDevices (active, per account) and MaxChains (per
 	// account) bound what the server keeps; 0 for no limit.
 	MaxAccounts int64
@@ -88,7 +98,10 @@ type Config struct {
 // Accounts serves the account API and checks device tokens.
 type Accounts struct {
 	Config
-	fakes *credential.Fakes
+	fakes    *credential.Fakes
+	known    *deviceCache
+	chains   *chainCache
+	accounts *accountSet
 }
 
 // New returns the account service.
@@ -96,7 +109,7 @@ func New(c Config) *Accounts {
 	if c.Hasher == nil {
 		c.Hasher = credential.NewHasher(c.Hash)
 	}
-	return &Accounts{Config: c, fakes: &credential.Fakes{Secret: func(ctx context.Context) ([]byte, error) {
+	return &Accounts{Config: c, known: newDeviceCache(), chains: newChainCache(), accounts: newAccountSet(), fakes: &credential.Fakes{Secret: func(ctx context.Context) ([]byte, error) {
 		return c.Store.ServerSecret(ctx, fakeSecret)
 	}}}
 }
@@ -272,6 +285,7 @@ func (a *Accounts) create(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		a.fail(w, err)
 	default:
+		a.accounts.add(account.ID)
 		jsonapi.Write(w, http.StatusCreated, createResponse{Account: account.ID})
 	}
 }
@@ -299,9 +313,22 @@ func (a *Accounts) unlock(w http.ResponseWriter, r *http.Request) {
 	if !a.check(w, r, req.ID, e, ok, req.Auth) {
 		return
 	}
+	// An installation keeps its key, so signing in again adds nothing; a
+	// key new to the account counts against the account's few a day.
+	if a.NewDevices != nil {
+		active, err := a.Store.UseDevice(r.Context(), e.AccountID, req.Device.PublicKey, TouchInterval)
+		if err != nil {
+			a.fail(w, err)
+			return
+		}
+		if !active && !a.allow(w, a.NewDevices, e.AccountID) {
+			return
+		}
+	}
 	err = a.Store.AddDevice(r.Context(), store.Device{
 		AccountID: e.AccountID, PublicKey: req.Device.PublicKey, Name: req.Device.Name,
 	}, a.MaxDevices)
+	a.known.forget(e.AccountID, req.Device.PublicKey)
 	switch {
 	case errors.Is(err, store.ErrDeviceRemoved):
 		jsonapi.Error(w, http.StatusConflict, "this device key was removed from the account; make a new one")
@@ -312,6 +339,7 @@ func (a *Accounts) unlock(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		a.fail(w, err)
 	default:
+		a.accounts.add(e.AccountID)
 		jsonapi.Write(w, http.StatusOK, unlockResponse{Account: e.AccountID, Wrapped: e.Wrapped})
 	}
 }
@@ -397,6 +425,9 @@ func (a *Accounts) remove(w http.ResponseWriter, r *http.Request) {
 	// helps nobody. DeleteAccount runs in one transaction anyway.
 	ctx := context.WithoutCancel(r.Context())
 	chains, err := a.Store.DeleteAccount(ctx, d.Account)
+	a.known.forget(d.Account, nil)
+	a.chains.forgetAccount(d.Account)
+	a.accounts.remove(d.Account)
 	if err != nil {
 		a.fail(w, err)
 		return
@@ -436,11 +467,15 @@ func (a *Accounts) removeDevice(w http.ResponseWriter, r *http.Request) {
 	if !a.allow(w, a.Changes, d.Account) || !jsonapi.ValidID(w, id) {
 		return
 	}
-	if !a.confirm(w, r, d.Account) {
+	target, _ := hex.DecodeString(id)
+	// A device may sign itself out without the password: it can only lose
+	// its own access. Removing another device takes the password.
+	self := subtle.ConstantTimeCompare(target, d.PublicKey) == 1
+	if !self && !a.confirm(w, r, d.Account) {
 		return
 	}
-	target, _ := hex.DecodeString(id)
 	err := a.Store.RemoveDevice(r.Context(), d.Account, target)
+	a.known.forget(d.Account, target)
 	switch {
 	case errors.Is(err, store.ErrNoDevice):
 		jsonapi.Error(w, http.StatusNotFound, "no such device")
@@ -467,11 +502,32 @@ func (a *Accounts) Authenticate(next http.Handler) http.Handler {
 			http.Error(w, err.Error(), http.StatusUnauthorized)
 			return
 		}
-		active, err := a.Store.UseDevice(r.Context(), d.Account, d.PublicKey, TouchInterval)
-		if err != nil {
-			a.Log.Error("look up device", "error", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+		// What one device may ask, whatever it asks, before the database.
+		if ok, wait := a.DeviceRequests.Allow(string(d.PublicKey)); !ok {
+			a.Metrics.Limited("device_rate")
+			jsonapi.TooMany(w, wait)
 			return
+		}
+		active, known := a.known.get(d.Account, d.PublicKey)
+		if !known {
+			if !a.accounts.has(d.Account) {
+				if ok, wait := a.UnknownLookups.Allow(""); !ok {
+					a.Metrics.Limited("unknown_lookups")
+					w.Header().Set("Retry-After", strconv.Itoa(int(max(wait, time.Second)/time.Second)))
+					http.Error(w, "busy", http.StatusServiceUnavailable)
+					return
+				}
+			}
+			active, err = a.Store.UseDevice(r.Context(), d.Account, d.PublicKey, TouchInterval)
+			if err != nil {
+				a.Log.Error("look up device", "error", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			a.known.put(d.Account, d.PublicKey, active)
+			if active {
+				a.accounts.add(d.Account)
+			}
 		}
 		if !active {
 			// Removed, never added, or its account was deleted.
@@ -495,10 +551,18 @@ func (a *Accounts) ChainAccess(next http.Handler) http.Handler {
 			http.Error(w, "chain must be 64 lowercase hex digits", http.StatusBadRequest)
 			return
 		}
-		owner, claimed, err := a.Store.ChainAccount(r.Context(), chainID)
-		if err == nil && !claimed {
-			err = a.Store.ClaimChain(r.Context(), d.Account, chainID, a.MaxChains)
-			owner = d.Account
+		owner, known := a.chains.get(chainID)
+		var err error
+		if !known {
+			var claimed bool
+			owner, claimed, err = a.Store.ChainAccount(r.Context(), chainID)
+			if err == nil && !claimed {
+				err = a.Store.ClaimChain(r.Context(), d.Account, chainID, a.MaxChains)
+				owner = d.Account
+			}
+			if err == nil {
+				a.chains.put(chainID, owner)
+			}
 		}
 		switch {
 		case errors.Is(err, store.ErrChainTaken), err == nil && owner != d.Account:

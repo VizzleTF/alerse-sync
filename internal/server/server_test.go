@@ -119,9 +119,9 @@ func TestCommand(t *testing.T) {
 	}{
 		{"plain", request{path: cmd + "/?client=Chromium&client_id=x", body: body, token: token}, 200, false},
 		{"no trailing slash", request{path: cmd, body: body, token: token}, 200, false},
-		// The response is too small to compress.
+		// The response, with its nudge delays, is large enough to compress.
 		{"gzip request", request{path: cmd + "/", body: gzipped(t, body), token: token,
-			encoding: "gzip", accept: "gzip, deflate"}, 200, false},
+			encoding: "gzip", accept: "gzip, deflate"}, 200, true},
 		{"no token", request{path: cmd + "/", body: body}, 401, false},
 		{"not protobuf", request{path: cmd + "/", body: []byte("hello"), token: token}, 400, false},
 		{"bad gzip", request{path: cmd + "/", body: body, token: token, encoding: "gzip"}, 400, false},

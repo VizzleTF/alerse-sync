@@ -46,8 +46,10 @@ type Limits struct {
 	PollInterval time.Duration
 	// CommitBatchSize is the number of entities a client puts in a commit.
 	CommitBatchSize int
-	// SessionsNudgeDelay is how long a client waits before it commits a
-	// change to its open tabs; 0 leaves Chromium's 15 seconds.
+	// NudgeDelay is how long a client waits before it commits a local
+	// change, to send a batch of them at once; 0 leaves Chromium's delays.
+	// SessionsNudgeDelay is that for open tabs, 0 for Chromium's 15 seconds.
+	NudgeDelay         time.Duration
 	SessionsNudgeDelay time.Duration
 	// RequireCustomPassphrase refuses data a client could encrypt until the
 	// chain's Nigori node says it is encrypted with a custom passphrase, and
@@ -67,7 +69,8 @@ var DefaultLimits = Limits{
 	MaxUpdateBytes:     16 << 20,
 	PollInterval:       time.Hour,
 	CommitBatchSize:    100,
-	SessionsNudgeDelay: 3 * time.Second,
+	NudgeDelay:         time.Minute,
+	SessionsNudgeDelay: 15 * time.Second,
 }
 
 // Notifier tells a chain's other devices which data types changed.
@@ -81,6 +84,8 @@ type Service struct {
 	notifier Notifier
 	limits   Limits
 	now      func() time.Time
+	// nudgeDelays go to clients with every response.
+	nudgeDelays []*pb.CustomNudgeDelay
 	options
 }
 
@@ -106,7 +111,8 @@ func WithEvictionObserver(observe func(n int64)) Option {
 
 // New returns a service. notifier may be nil.
 func New(st store.Store, notifier Notifier, limits Limits, opts ...Option) *Service {
-	s := &Service{store: st, notifier: notifier, limits: limits, now: time.Now}
+	s := &Service{store: st, notifier: notifier, limits: limits, now: time.Now,
+		nudgeDelays: nudgeDelays(limits.NudgeDelay, limits.SessionsNudgeDelay)}
 	for _, opt := range opts {
 		opt(&s.options)
 	}
@@ -137,14 +143,7 @@ func (s *Service) Handle(ctx context.Context, chainID string, msg *pb.ClientToSe
 			MaxCommitBatchSize:  proto.Int32(int32(s.limits.CommitBatchSize)),
 		},
 	}
-	if d := s.limits.SessionsNudgeDelay; d > 0 {
-		// Open tabs reach the other devices in seconds: Chromium waits 15 s
-		// to merge a page load's commits, and applies the server's delay as is.
-		rsp.ClientCommand.CustomNudgeDelays = []*pb.CustomNudgeDelay{{
-			DatatypeId: proto.Int32(sessionType),
-			DelayMs:    proto.Int32(int32(d / time.Millisecond)),
-		}}
-	}
+	rsp.ClientCommand.CustomNudgeDelays = s.nudgeDelays
 
 	var err error
 	var wait throttled

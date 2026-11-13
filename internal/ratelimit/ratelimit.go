@@ -47,6 +47,17 @@ func NewPer(n int, period time.Duration) *Limiter {
 	}
 }
 
+// NewBurst returns a limiter of n requests per period per key that lets a
+// key spend up to burst at once, or nil if n or burst is not positive.
+func NewBurst(n int, period time.Duration, burst int) *Limiter {
+	l := NewPer(n, period)
+	if l == nil || burst <= 0 {
+		return nil
+	}
+	l.burst = float64(burst)
+	return l
+}
+
 // Keys returns the number of keys the limiter tracks.
 func (l *Limiter) Keys() int {
 	if l == nil {
