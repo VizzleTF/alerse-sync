@@ -198,7 +198,12 @@ go run ./cmd/arcomium-sync                 # needs DATABASE_URL
 
 CI runs the tests with `-race` on Postgres, `govulncheck` and golangci-lint. Releases
 build the multi-arch image with an SBOM and build provenance, from base images and
-actions pinned by digest.
+actions pinned by digest, and sign it with Sigstore. To check an image before you run
+it:
+
+```sh
+cosign verify ghcr.io/vizzletf/alerse-sync:0.1.5   --certificate-identity-regexp '^https://github.com/VizzleTF/alerse-sync/.github/workflows/release.yml@refs/tags/v'   --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 The protocol definitions in `proto/` come from Chromium. After moving Alerse
 to a new Chromium version, refresh them with `scripts/update-protos.sh
