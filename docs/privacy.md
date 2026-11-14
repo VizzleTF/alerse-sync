@@ -17,8 +17,9 @@ this policy does not cover it.
 
 The server is run by the maintainer of Alerse, VizzleTF on GitHub: the controller of
 this data under the GDPR. Contact:
-[open a private report](https://github.com/VizzleTF/alerse-sync/security/advisories/new)
-in the alerse-sync repository; say in its title that it is a privacy request.
+[open an issue](https://github.com/VizzleTF/alerse-sync/issues/new) in the alerse-sync repository with "privacy" in its title.
+Issues are public: write no password, recovery words or other personal data in it.
+The reply says how to prove the account is yours.
 
 ## What is kept, why and for how long
 
