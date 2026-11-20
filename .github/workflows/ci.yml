@@ -29,6 +29,12 @@ jobs:
           go-version: 1.27
       - name: unit tests
         run: go test -race ./...
+      # The Postgres tests download PostgreSQL from Maven Central, which
+      # sometimes answers with an error; a cached copy needs no download.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.embedded-postgres-go
+          key: embedded-postgres-${{ runner.os }}-${{ hashFiles('go.sum') }}
       # Starts its own Postgres, one package at a time: the protocol tests
       # and the end-to-end tests each start one.
       - name: Postgres tests

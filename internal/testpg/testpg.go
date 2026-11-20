@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,9 +33,17 @@ func Start(ctx context.Context) (pool *pgxpool.Pool, stop func(), err error) {
 		RuntimePath(filepath.Join(dir, "runtime")).
 		DataPath(filepath.Join(dir, "data")).
 		Logger(io.Discard))
-	if err := db.Start(); err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, nil, fmt.Errorf("start postgres: %w", err)
+	// the download from Maven Central sometimes fails for a moment
+	for attempt := 1; ; attempt++ {
+		err = db.Start()
+		if err == nil {
+			break
+		}
+		if attempt == 3 {
+			_ = os.RemoveAll(dir)
+			return nil, nil, fmt.Errorf("start postgres: %w", err)
+		}
+		time.Sleep(time.Duration(attempt) * 5 * time.Second)
 	}
 	stop = func() {
 		if pool != nil {
