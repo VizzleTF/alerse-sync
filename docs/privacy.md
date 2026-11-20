@@ -6,6 +6,8 @@ this policy does not cover it.
 
 ## In short
 
+- Alerse collects nothing about you. Data is kept only to make sync work, and only if
+  you use this server: with your own server or no sync, nothing reaches us.
 - Everything Alerse syncs is encrypted on your device before it is sent. The server
   stores it as data it cannot open: it never has your 24 words, your password or your
   account key.
