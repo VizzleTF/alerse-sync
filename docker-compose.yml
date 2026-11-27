@@ -56,7 +56,7 @@ services:
         condition: service_healthy
 
   postgres:
-    image: postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
+    image: postgres:19-alpine@sha256:cac45fb483caee3668946088a1c0532db89d5285c28dbfeac889b4068296e06f
     restart: unless-stopped
     environment:
       POSTGRES_USER: arcomium
